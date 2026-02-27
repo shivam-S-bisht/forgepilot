@@ -11,10 +11,18 @@ npm link
 
 After this, `forgepilot` is available globally on your machine.
 
+For TypeScript changes, build once before running locally:
+
+```bash
+npm run build
+```
+
 ## Usage
 
 ```bash
+forgepilot --tickets
 forgepilot [--target-dir <path>] [--jira "<jira-description>"] [--task "<task>"] [--agent <agent-id>]
+forgepilot --list-tickets
 ```
 
 ## Agent IDs
@@ -29,6 +37,12 @@ If `--agent` is not provided, an arrow-key selector opens.
 ## Examples
 
 ```bash
+# open interactive Jira ticket workflow (admin-like)
+forgepilot --tickets --target-dir ~/dev
+
+# list all your assigned Jira ticket links
+forgepilot --list-tickets
+
 # run with prompts for missing inputs
 forgepilot --task "Implement unread notification endpoint"
 
