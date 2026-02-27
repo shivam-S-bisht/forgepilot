@@ -1,0 +1,6 @@
+{
+  "tagPrefix": "v",
+  "skip": {
+    "changelog": false
+  }
+}

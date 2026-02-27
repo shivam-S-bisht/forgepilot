@@ -36,6 +36,33 @@ npm run build
 npm publish
 ```
 
+## Release flow (SemVer + changelog + tag publish)
+
+This project uses `standard-version` to bump versions using commit history and update `CHANGELOG.md`.
+
+- `fix:` commits bump patch (`x.y.z+1`)
+- `feat:` commits bump minor (`x.y+1.0`)
+- `BREAKING CHANGE:` bumps major (`x+1.0.0`)
+
+Release steps:
+
+```bash
+# create version bump + CHANGELOG.md + git tag (vX.Y.Z)
+npm run release
+
+# push commit and tag
+git push && git push --tags
+```
+
+When a tag like `v1.2.3` is pushed, GitHub Actions workflow publishes automatically to GitHub Packages.
+
+For the first release:
+
+```bash
+npm run release:first
+git push && git push --tags
+```
+
 ## Install (private with token)
 
 On user machine, add in `~/.npmrc`:

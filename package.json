@@ -20,6 +20,8 @@
     "start": "node ./dist/index.js",
     "dev": "tsup --watch",
     "link": "npm run build && npm link",
+    "release": "standard-version",
+    "release:first": "standard-version --first-release",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier . --write",
@@ -36,6 +38,7 @@
     "eslint-config-prettier": "^10.1.8",
     "globals": "^16.5.0",
     "prettier": "^3.8.1",
+    "standard-version": "^9.5.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.1"
