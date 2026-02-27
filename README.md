@@ -6,6 +6,7 @@ A local CLI to run coding agents against any repository while automatically inje
 
 ```bash
 cd ~/dev/forgepilot
+npm run build
 npm link
 ```
 
@@ -15,6 +16,40 @@ For TypeScript changes, build once before running locally:
 
 ```bash
 npm run build
+```
+
+## Publish (private via GitHub Packages)
+
+This package is scoped to `@shivam-s-bisht`.
+
+1) Add auth token on publisher machine in `~/.npmrc`:
+
+```ini
+@shivam-s-bisht:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=ghp_your_token
+```
+
+2) Build and publish:
+
+```bash
+npm run build
+npm publish
+```
+
+## Install (private with token)
+
+On user machine, add in `~/.npmrc`:
+
+```ini
+@shivam-s-bisht:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=ghp_user_read_token
+```
+
+Then install globally:
+
+```bash
+npm i -g @shivam-s-bisht/forgepilot
+forgepilot
 ```
 
 ## Usage

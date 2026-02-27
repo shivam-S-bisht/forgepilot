@@ -1,8 +1,16 @@
 {
-  "name": "forgepilot",
+  "name": "@shivam-s-bisht/forgepilot",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
   "bin": {
     "forgepilot": "./dist/index.js"
   },
