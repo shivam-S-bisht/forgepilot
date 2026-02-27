@@ -143,137 +143,10 @@ async function analyzeTicketWithAi(detail: JiraIssueDetail, hasContributing: boo
 			return normalizeConcerns(extractJsonPayload(stdout)).slice(0, 6);
 		}
 	} catch {
-		// Fallback to heuristic checks below.
+		// Ignore AI preflight failures; caller will decide whether to continue without concerns.
 	}
 
 	return null;
-}
-
-export function analyzeTicket(detail: JiraIssueDetail, hasContributing: boolean): PreflightConcern[] {
-	const concerns: PreflightConcern[] = [];
-	const description = getDescriptionText(detail);
-	const ac = getAcceptanceCriteria(detail);
-	const comments = commentsText(detail);
-	const repoLabels = extractRepoLabels(description);
-
-	if (description === 'Not available' || description.length < 30) {
-		concerns.push({
-			id: 'empty-description',
-			severity: 'warning',
-			message: 'The ticket description is missing or very short.',
-			hint: 'What should the AI implement? Provide a brief summary of the expected work.',
-		});
-	}
-
-	if (ac === 'Not available') {
-		concerns.push({
-			id: 'missing-ac',
-			severity: 'warning',
-			message: 'No acceptance criteria found on this ticket.',
-			hint: 'What conditions must be met for this work to be considered done?',
-		});
-	}
-
-	if (!repoLabels.length) {
-		concerns.push({
-			id: 'no-repo-urls',
-			severity: 'question',
-			message: 'No repository URLs found in the ticket description.',
-			hint: 'Which repository should the AI work in? The user will be asked for a path manually.',
-		});
-	}
-
-	if (!hasContributing) {
-		concerns.push({
-			id: 'no-contributing',
-			severity: 'warning',
-			message: 'No CONTRIBUTING.md or AGENTS.md found in the target repository.',
-			hint: 'Are there any coding conventions, branch naming rules, or style guides the AI should follow?',
-		});
-	}
-
-	if (description !== 'Not available' && ac !== 'Not available') {
-		const descLower = description.toLowerCase();
-		const acLower = ac.toLowerCase();
-
-		const descMentionsApi = /\b(api|endpoint|rest|graphql)\b/.test(descLower);
-		const acMentionsUi = /\b(ui|button|screen|page|modal|component|view)\b/.test(acLower);
-		const acMentionsApi = /\b(api|endpoint|rest|graphql)\b/.test(acLower);
-		const descMentionsUi = /\b(ui|button|screen|page|modal|component|view)\b/.test(descLower);
-
-		if (descMentionsApi && acMentionsUi && !descMentionsUi && !acMentionsApi) {
-			concerns.push({
-				id: 'desc-ac-mismatch',
-				severity: 'question',
-				message:
-					'The description talks about API/backend work, but the acceptance criteria mention UI/frontend work.',
-				hint: 'Should the AI focus on backend, frontend, or both?',
-			});
-		}
-		if (descMentionsUi && acMentionsApi && !descMentionsApi && !acMentionsUi) {
-			concerns.push({
-				id: 'desc-ac-mismatch',
-				severity: 'question',
-				message:
-					'The description talks about UI/frontend work, but the acceptance criteria mention API/backend work.',
-				hint: 'Should the AI focus on frontend, backend, or both?',
-			});
-		}
-	}
-
-	if (comments !== 'No comments') {
-		const commentLines = comments.split('\n');
-		const questionPattern = /\?\s*$/;
-		const unansweredQuestions = commentLines.filter((line) => questionPattern.test(line.trim()));
-		if (unansweredQuestions.length >= 2) {
-			concerns.push({
-				id: 'open-questions-in-comments',
-				severity: 'question',
-				message: `There are ${unansweredQuestions.length} question(s) in the ticket comments that may be unresolved.`,
-				hint: 'Are these questions already resolved? Provide any context the AI should know.',
-			});
-		}
-	}
-
-	if (description !== 'Not available') {
-		const vaguePatterns = [
-			/\b(tbd|to be decided|to be determined)\b/i,
-			/\b(todo|to-do|to do)\b/i,
-			/\b(placeholder|tbc|to be confirmed)\b/i,
-			/\bwip\b/i,
-		];
-		const hasVague = vaguePatterns.some((p) => p.test(description));
-		if (hasVague) {
-			concerns.push({
-				id: 'vague-description',
-				severity: 'question',
-				message: 'The description contains placeholder text (TBD, TODO, WIP, etc.).',
-				hint: 'Can you clarify the parts that are still undecided?',
-			});
-		}
-	}
-
-	const title = detail.fields.summary ?? '';
-	const status = detail.fields.status?.name?.toLowerCase() ?? '';
-	if (status.includes('done') || status.includes('closed') || status.includes('resolved')) {
-		concerns.push({
-			id: 'ticket-already-done',
-			severity: 'warning',
-			message: `This ticket is marked as "${detail.fields.status?.name}". Are you sure you want the AI to work on it?`,
-			hint: 'Type "yes" to proceed or "no" to cancel.',
-		});
-	}
-
-	if (title.length < 10 && description === 'Not available') {
-		concerns.push({
-			id: 'insufficient-context',
-			severity: 'warning',
-			message: 'Both the title and description are too brief for the AI to understand the task.',
-			hint: 'Please describe what the AI should implement.',
-		});
-	}
-
-	return concerns;
 }
 
 export async function runPreflightChecks(
@@ -281,19 +154,16 @@ export async function runPreflightChecks(
 	hasContributing: boolean,
 ): Promise<PreflightResult> {
 	const aiConcerns = await analyzeTicketWithAi(detail, hasContributing);
-	const concerns = aiConcerns && aiConcerns.length > 0 ? aiConcerns : analyzeTicket(detail, hasContributing);
+	const concerns = aiConcerns ?? [];
 	const answers = new Map<string, string>();
 
 	if (!concerns.length) {
-		console.log(chalk.green('\n  ✓ Preflight checks passed — no concerns found.\n'));
+		console.log(chalk.gray('\n  Preflight source: AI reviewer'));
+		console.log(chalk.green('  ✓ No AI concerns found (or AI reviewer unavailable). Continuing.\n'));
 		return { concerns, answers };
 	}
 
-	if (aiConcerns && aiConcerns.length > 0) {
-		console.log(chalk.gray('  Preflight source: AI reviewer'));
-	} else {
-		console.log(chalk.gray('  Preflight source: fallback rules'));
-	}
+	console.log(chalk.gray('  Preflight source: AI reviewer'));
 
 	console.log(chalk.bold.yellow(`\n  ⚠ Preflight: ${concerns.length} concern(s) detected before starting work:\n`));
 
