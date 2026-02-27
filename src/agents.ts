@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import chalk from 'chalk';
 import { prepareRepoForWork, readContributing } from './git.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
+import { formatClarifications, runPreflightChecks } from './preflight.js';
 import type { JiraIssueDetail, WorkAgentOption } from './types.js';
 
 async function runCommandInteractive(command: string, args: string[], toolName: string, cwd?: string): Promise<void> {
@@ -29,8 +30,9 @@ async function runCopilotForTicket(
 	repoPath: string,
 	contributing: string,
 	autonomous: boolean,
+	clarifications: string,
 ): Promise<void> {
-	const prompt = buildWorkPrompt(detail, contributing);
+	const prompt = buildWorkPrompt(detail, contributing, clarifications);
 	const args = autonomous
 		? ['-p', prompt, '--autopilot', '--allow-all-tools', '--allow-all-paths', '--add-dir', repoPath]
 		: ['-i', prompt, '--add-dir', repoPath];
@@ -41,9 +43,10 @@ async function runRovoForTicket(
 	detail: JiraIssueDetail,
 	repoPath: string,
 	contributing: string,
+	clarifications: string,
 ): Promise<void> {
 	const jiraUrl = getJiraBrowseUrl(detail);
-	const prompt = buildWorkPrompt(detail, contributing);
+	const prompt = buildWorkPrompt(detail, contributing, clarifications);
 	const args = ['rovodev', 'run', '--yolo', '--jira', jiraUrl, prompt];
 	await runCommandInteractive('acli', args, 'Rovo', repoPath);
 }
@@ -52,8 +55,9 @@ async function runCursorForTicket(
 	detail: JiraIssueDetail,
 	repoPath: string,
 	contributing: string,
+	clarifications: string,
 ): Promise<void> {
-	const prompt = buildWorkPrompt(detail, contributing);
+	const prompt = buildWorkPrompt(detail, contributing, clarifications);
 	const args = ['agent', '--yolo', '--workspace', repoPath, '-p', prompt];
 	await runCommandInteractive('cursor', args, 'Cursor Agent', repoPath);
 }
@@ -89,11 +93,16 @@ export async function launchAgentForRepos(
 	repoPaths: Map<string, string>,
 ): Promise<void> {
 	const paths = [...repoPaths.values()];
+
+	const firstRepoContributing = await readContributing(paths[0]);
+	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
+	const clarifications = formatClarifications(preflight);
+
 	for (const repoPath of paths) {
 		console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
 		await prepareRepoForWork(repoPath, detail.key);
 
-		const contributing = await readContributing(repoPath);
+		const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(repoPath);
 		if (contributing) {
 			console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${repoPath}`));
 		}
@@ -101,16 +110,16 @@ export async function launchAgentForRepos(
 		console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
 		switch (agentOption.id) {
 			case 'copilot-autonomous':
-				await runCopilotForTicket(detail, repoPath, contributing, true);
+				await runCopilotForTicket(detail, repoPath, contributing, true, clarifications);
 				break;
 			case 'copilot-interactive':
-				await runCopilotForTicket(detail, repoPath, contributing, false);
+				await runCopilotForTicket(detail, repoPath, contributing, false, clarifications);
 				break;
 			case 'rovo-autonomous':
-				await runRovoForTicket(detail, repoPath, contributing);
+				await runRovoForTicket(detail, repoPath, contributing, clarifications);
 				break;
 			case 'cursor-autonomous':
-				await runCursorForTicket(detail, repoPath, contributing);
+				await runCursorForTicket(detail, repoPath, contributing, clarifications);
 				break;
 		}
 	}
