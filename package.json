@@ -7,10 +7,11 @@
     "forgepilot": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
     "prepare": "npm run build",
     "start": "node ./dist/index.js",
-    "dev": "tsc --watch",
+    "dev": "tsup --watch",
+    "link": "npm run build && npm link",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier . --write",
@@ -27,7 +28,8 @@
     "eslint-config-prettier": "^10.1.8",
     "globals": "^16.5.0",
     "prettier": "^3.8.1",
-    "typescript-eslint": "^8.46.1",
-    "typescript": "^5.9.3"
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.1"
   }
 }
