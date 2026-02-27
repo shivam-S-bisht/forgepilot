@@ -4,8 +4,20 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
+import { getCached, setCached } from './cache.js';
 
 const execFileAsync = promisify(execFile);
+
+type BranchStateEntry = {
+	ticketKey: string;
+	repoPath: string;
+	branchName: string;
+	existedBefore: boolean;
+	action: 'created' | 'reused';
+	lastPreparedAt: string;
+};
+
+type BranchStateCache = Record<string, BranchStateEntry>;
 
 export async function gitExec(repoPath: string, args: string[]): Promise<string> {
 	const { stdout } = await execFileAsync('git', ['-C', repoPath, ...args], { maxBuffer: 10 * 1024 * 1024 });
@@ -61,13 +73,32 @@ export async function prepareRepoForWork(repoPath: string, ticketKey: string): P
 	}
 
 	const existingBranches = await gitExec(repoPath, ['branch', '--list', branchName]);
+	let existedBefore = false;
 	if (existingBranches) {
+		existedBefore = true;
 		console.log(chalk.gray(`  Switching to existing branch ${branchName}...`));
 		await gitExec(repoPath, ['checkout', branchName]);
+		try {
+			await gitExec(repoPath, ['pull', '--ff-only']);
+		} catch {
+			console.log(chalk.yellow(`  Warning: pull --ff-only failed on ${branchName}, continuing.`));
+		}
 	} else {
 		console.log(chalk.gray(`  Creating new branch ${branchName}...`));
 		await gitExec(repoPath, ['checkout', '-b', branchName]);
 	}
+
+	const cacheKey = `branch-state-${ticketKey.toLowerCase()}`;
+	const branchState = (await getCached<BranchStateCache>(cacheKey)) ?? {};
+	branchState[repoPath] = {
+		ticketKey,
+		repoPath,
+		branchName,
+		existedBefore,
+		action: existedBefore ? 'reused' : 'created',
+		lastPreparedAt: new Date().toISOString(),
+	};
+	await setCached(cacheKey, branchState);
 
 	console.log(chalk.green(`  Ready on branch ${branchName}`));
 }

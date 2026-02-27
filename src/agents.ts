@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { prepareRepoForWork, readContributing } from './git.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
+import { notifySlackStatus } from './slack.js';
 import type { JiraIssueDetail, WorkAgentOption } from './types.js';
 
 async function runCommandInteractive(command: string, args: string[], toolName: string, cwd?: string): Promise<void> {
@@ -97,30 +98,41 @@ export async function launchAgentForRepos(
 	const firstRepoContributing = await readContributing(paths[0]);
 	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
 	const clarifications = formatClarifications(preflight);
+	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
 
 	for (const repoPath of paths) {
-		console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
-		await prepareRepoForWork(repoPath, detail.key);
+		try {
+			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
+			await prepareRepoForWork(repoPath, detail.key);
 
-		const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(repoPath);
-		if (contributing) {
-			console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${repoPath}`));
-		}
+			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(repoPath);
+			if (contributing) {
+				console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${repoPath}`));
+			}
 
-		console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
-		switch (agentOption.id) {
-			case 'copilot-autonomous':
-				await runCopilotForTicket(detail, repoPath, contributing, true, clarifications);
-				break;
-			case 'copilot-interactive':
-				await runCopilotForTicket(detail, repoPath, contributing, false, clarifications);
-				break;
-			case 'rovo-autonomous':
-				await runRovoForTicket(detail, repoPath, contributing, clarifications);
-				break;
-			case 'cursor-autonomous':
-				await runCursorForTicket(detail, repoPath, contributing, clarifications);
-				break;
+			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
+			switch (agentOption.id) {
+				case 'copilot-autonomous':
+					await runCopilotForTicket(detail, repoPath, contributing, true, clarifications);
+					break;
+				case 'copilot-interactive':
+					await runCopilotForTicket(detail, repoPath, contributing, false, clarifications);
+					break;
+				case 'rovo-autonomous':
+					await runRovoForTicket(detail, repoPath, contributing, clarifications);
+					break;
+				case 'cursor-autonomous':
+					await runCursorForTicket(detail, repoPath, contributing, clarifications);
+					break;
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await notifySlackStatus(
+				`ForgePilot error for ${detail.key} in ${repoPath} using ${agentOption.label}: ${message}`,
+			);
+			throw error;
 		}
 	}
+
+	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 }

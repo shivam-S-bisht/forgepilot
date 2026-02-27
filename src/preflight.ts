@@ -1,9 +1,12 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
+import { getCached, setCached } from './cache.js';
 import { commentsText, getAcceptanceCriteria, getDescriptionText, linkedIssuesText } from './jira-text.js';
 import { extractRepoLabels } from './repo.js';
+import { askConcernViaSlack, shouldUseSlackQa } from './slack.js';
 import type { JiraIssueDetail } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -18,7 +21,57 @@ export type PreflightConcern = {
 export type PreflightResult = {
 	concerns: PreflightConcern[];
 	answers: Map<string, string>;
+	historyForPrompt: string;
 };
+
+type TicketHistoryEntry = {
+	timestamp: string;
+	contextHash: string;
+	concerns: PreflightConcern[];
+	answers: Array<{ concernId: string; answer: string }>;
+};
+
+type TicketHistoryRecord = {
+	ticketKey: string;
+	entries: TicketHistoryEntry[];
+};
+
+function normalizeForMatch(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^a-z0-9\s]/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function concernMatchKey(concern: PreflightConcern): string {
+	return `${concern.severity}::${normalizeForMatch(concern.message)}`;
+}
+
+function buildPriorAnswerIndex(history: TicketHistoryRecord): Map<string, string> {
+	const byConcernId = new Map<string, string>();
+	const byMessageKey = new Map<string, string>();
+
+	for (let i = history.entries.length - 1; i >= 0; i -= 1) {
+		const entry = history.entries[i];
+		for (const answer of entry.answers) {
+			if (!answer.answer?.trim()) continue;
+			const concern = entry.concerns.find((c) => c.id === answer.concernId);
+			const messageKey = concern ? concernMatchKey(concern) : '';
+			if (!byConcernId.has(answer.concernId)) {
+				byConcernId.set(answer.concernId, answer.answer.trim());
+			}
+			if (messageKey && !byMessageKey.has(messageKey)) {
+				byMessageKey.set(messageKey, answer.answer.trim());
+			}
+		}
+	}
+
+	const merged = new Map<string, string>();
+	for (const [k, v] of byConcernId) merged.set(`id::${k}`, v);
+	for (const [k, v] of byMessageKey) merged.set(`msg::${k}`, v);
+	return merged;
+}
 
 function askLine(prompt: string): Promise<string> {
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -35,7 +88,15 @@ function trimForPrompt(value: string, max = 5000): string {
 	return `${value.slice(0, max)}\n... (truncated)`;
 }
 
-function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolean): string {
+function toTicketContext(detail: JiraIssueDetail): {
+	title: string;
+	status: string;
+	description: string;
+	ac: string;
+	comments: string;
+	links: string;
+	repoUrls: string[];
+} {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
 	const description = getDescriptionText(detail);
@@ -43,6 +104,41 @@ function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolea
 	const comments = commentsText(detail);
 	const links = linkedIssuesText(detail);
 	const repoUrls = extractRepoLabels(description).map((x) => x.normalizedUrl);
+	return { title, status, description, ac, comments, links, repoUrls };
+}
+
+function ticketContextHash(detail: JiraIssueDetail): string {
+	const ctx = toTicketContext(detail);
+	const raw = JSON.stringify({
+		key: detail.key,
+		title: ctx.title,
+		status: ctx.status,
+		description: ctx.description,
+		ac: ctx.ac,
+		comments: ctx.comments,
+		links: ctx.links,
+		repoUrls: ctx.repoUrls,
+	});
+	return createHash('sha256').update(raw).digest('hex');
+}
+
+function formatHistoryForPrompt(history: TicketHistoryRecord | null, maxEntries = 3): string {
+	if (!history || history.entries.length === 0) return '';
+	const recent = history.entries.slice(-maxEntries);
+	const lines = ['Ticket history (previous preflight sessions):'];
+	for (const entry of recent) {
+		lines.push(`- ${entry.timestamp} | context=${entry.contextHash.slice(0, 12)}`);
+		for (const ans of entry.answers) {
+			const concern = entry.concerns.find((c) => c.id === ans.concernId);
+			lines.push(`  Q: ${concern?.message ?? ans.concernId}`);
+			lines.push(`  A: ${ans.answer}`);
+		}
+	}
+	return lines.join('\n');
+}
+
+function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolean, historyForPrompt: string): string {
+	const { title, status, description, ac, comments, links, repoUrls } = toTicketContext(detail);
 
 	return [
 		'You are a Jira ticket preflight reviewer for a coding agent.',
@@ -55,6 +151,7 @@ function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolea
 		'- Include concern(s) if ticket appears blocked/flagged/deferred/do-not-pick/requires dependency.',
 		'- Include concern(s) if description, AC, and comments conflict.',
 		'- Include concern(s) for missing repos, missing coding conventions, unclear scope, missing test expectations.',
+		'- If status indicates done/closed/resolved but new work may still be requested, still raise a warning.',
 		'',
 		`Ticket Key: ${detail.key}`,
 		`Title: ${title}`,
@@ -69,6 +166,8 @@ function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolea
 		`Linked Issues:\n${trimForPrompt(links, 3000)}`,
 		'',
 		`Comments:\n${trimForPrompt(comments, 6000)}`,
+		'',
+		historyForPrompt ? trimForPrompt(historyForPrompt, 4000) : 'Ticket history: (none)',
 	].join('\n');
 }
 
@@ -128,8 +227,12 @@ function normalizeConcerns(payload: unknown): PreflightConcern[] {
 	});
 }
 
-async function analyzeTicketWithAi(detail: JiraIssueDetail, hasContributing: boolean): Promise<PreflightConcern[] | null> {
-	const prompt = buildAiPreflightPrompt(detail, hasContributing);
+async function analyzeTicketWithAi(
+	detail: JiraIssueDetail,
+	hasContributing: boolean,
+	historyForPrompt: string,
+): Promise<PreflightConcern[] | null> {
+	const prompt = buildAiPreflightPrompt(detail, hasContributing, historyForPrompt);
 	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
 
 	try {
@@ -149,34 +252,106 @@ async function analyzeTicketWithAi(detail: JiraIssueDetail, hasContributing: boo
 	return null;
 }
 
+async function readTicketHistory(ticketKey: string): Promise<TicketHistoryRecord> {
+	const cacheKey = `ticket-history-${ticketKey.toLowerCase()}`;
+	const cached = await getCached<TicketHistoryRecord>(cacheKey);
+	if (cached && Array.isArray(cached.entries)) {
+		return cached;
+	}
+	return { ticketKey, entries: [] };
+}
+
+async function appendTicketHistory(
+	ticketKey: string,
+	entry: TicketHistoryEntry,
+	maxEntries = 20,
+): Promise<TicketHistoryRecord> {
+	const history = await readTicketHistory(ticketKey);
+	history.entries.push(entry);
+	if (history.entries.length > maxEntries) {
+		history.entries = history.entries.slice(-maxEntries);
+	}
+	await setCached(`ticket-history-${ticketKey.toLowerCase()}`, history);
+	return history;
+}
+
+async function askConcern(
+	concern: PreflightConcern,
+	ticketKey: string,
+	index: number,
+	total: number,
+): Promise<string> {
+	if (shouldUseSlackQa()) {
+		const answer = await askConcernViaSlack(concern, ticketKey, index, total);
+		return answer ?? '';
+	}
+	return askLine(chalk.cyan('    Your input (press Enter to skip): '));
+}
+
 export async function runPreflightChecks(
 	detail: JiraIssueDetail,
 	hasContributing: boolean,
 ): Promise<PreflightResult> {
-	const aiConcerns = await analyzeTicketWithAi(detail, hasContributing);
+	const ticketHash = ticketContextHash(detail);
+	const priorHistory = await readTicketHistory(detail.key);
+	const historyForPrompt = formatHistoryForPrompt(priorHistory);
+	const priorAnswerIndex = buildPriorAnswerIndex(priorHistory);
+	const aiConcerns = await analyzeTicketWithAi(detail, hasContributing, historyForPrompt);
 	const concerns = aiConcerns ?? [];
 	const answers = new Map<string, string>();
+	const concernsToAsk: PreflightConcern[] = [];
+	let reusedAnswers = 0;
 
 	if (!concerns.length) {
 		console.log(chalk.gray('\n  Preflight source: AI reviewer'));
 		console.log(chalk.green('  ✓ No AI concerns found (or AI reviewer unavailable). Continuing.\n'));
-		return { concerns, answers };
+		await appendTicketHistory(detail.key, {
+			timestamp: new Date().toISOString(),
+			contextHash: ticketHash,
+			concerns: [],
+			answers: [],
+		});
+		return { concerns, answers, historyForPrompt };
 	}
 
 	console.log(chalk.gray('  Preflight source: AI reviewer'));
+	if (shouldUseSlackQa()) {
+		console.log(chalk.gray('  Q&A channel: Slack'));
+	} else {
+		console.log(chalk.gray('  Q&A channel: Terminal'));
+	}
 
 	console.log(chalk.bold.yellow(`\n  ⚠ Preflight: ${concerns.length} concern(s) detected before starting work:\n`));
 
-	for (let i = 0; i < concerns.length; i++) {
-		const concern = concerns[i];
+	for (const concern of concerns) {
+		const cachedAnswerByMessage = priorAnswerIndex.get(`msg::${concernMatchKey(concern)}`);
+		const cachedAnswerById = priorAnswerIndex.get(`id::${concern.id}`);
+		const cachedAnswer = cachedAnswerByMessage ?? cachedAnswerById;
+		if (cachedAnswer) {
+			answers.set(concern.id, cachedAnswer);
+			reusedAnswers += 1;
+			if (concern.id === 'ticket-already-done' && cachedAnswer.toLowerCase() === 'no') {
+				throw new Error('User cancelled — ticket is already done (based on cached answer).');
+			}
+			continue;
+		}
+		concernsToAsk.push(concern);
+	}
+
+	if (reusedAnswers > 0) {
+		console.log(chalk.gray(`  Reused ${reusedAnswers} prior answer(s) from cache for similar concerns.`));
+	}
+
+	for (let i = 0; i < concernsToAsk.length; i++) {
+		const concern = concernsToAsk[i];
 		const icon = concern.severity === 'warning' ? chalk.yellow('⚠') : chalk.cyan('?');
-		console.log(`  ${icon} ${chalk.bold(`[${i + 1}/${concerns.length}]`)} ${concern.message}`);
+		console.log(`  ${icon} ${chalk.bold(`[${i + 1}/${concernsToAsk.length}]`)} ${concern.message}`);
 
 		if (concern.hint) {
 			console.log(chalk.gray(`    Hint: ${concern.hint}`));
 		}
 
-		const answer = await askLine(chalk.cyan('    Your input (press Enter to skip): '));
+		const answer = await askConcern(concern, detail.key, i + 1, concernsToAsk.length);
 
 		if (concern.id === 'ticket-already-done' && answer.toLowerCase() === 'no') {
 			throw new Error('User cancelled — ticket is already done.');
@@ -190,19 +365,38 @@ export async function runPreflightChecks(
 		}
 	}
 
-	if (answers.size > 0) {
-		console.log(chalk.green(`  ✓ Preflight complete — ${answers.size} clarification(s) will be included in the AI prompt.\n`));
+	if (!concernsToAsk.length) {
+		console.log(chalk.green('  ✓ Preflight complete — all concerns matched cached history, no new questions asked.\n'));
+	} else if (answers.size > 0) {
+		console.log(
+			chalk.green(
+				`  ✓ Preflight complete — ${answers.size} clarification(s) will be included in the AI prompt.\n`,
+			),
+		);
 	} else {
 		console.log(chalk.green('  ✓ Preflight complete — proceeding with no additional context.\n'));
 	}
 
-	return { concerns, answers };
+	await appendTicketHistory(detail.key, {
+		timestamp: new Date().toISOString(),
+		contextHash: ticketHash,
+		concerns,
+		answers: [...answers.entries()].map(([concernId, answer]) => ({ concernId, answer })),
+	});
+
+	const updatedHistory = await readTicketHistory(detail.key);
+	return { concerns, answers, historyForPrompt: formatHistoryForPrompt(updatedHistory) };
 }
 
 export function formatClarifications(result: PreflightResult): string {
-	if (!result.answers.size) return '';
-
-	const lines = ['--- USER CLARIFICATIONS (from preflight review) ---'];
+	const lines: string[] = [];
+	if (result.historyForPrompt) {
+		lines.push('--- TICKET HISTORY CONTEXT ---', result.historyForPrompt, '--- END TICKET HISTORY CONTEXT ---', '');
+	}
+	if (!result.answers.size) {
+		return lines.join('\n').trim();
+	}
+	lines.push('--- USER CLARIFICATIONS (from preflight review) ---');
 	for (const [concernId, answer] of result.answers) {
 		const concern = result.concerns.find((c) => c.id === concernId);
 		const label = concern?.message ?? concernId;
