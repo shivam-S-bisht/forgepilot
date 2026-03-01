@@ -179,7 +179,12 @@ export function getJiraBrowseUrl(detail: JiraIssueDetail): string {
 	return `https://clubautomation.atlassian.net/browse/${detail.key}`;
 }
 
-export function buildWorkPrompt(detail: JiraIssueDetail, contributing = '', clarifications = ''): string {
+export function buildWorkPrompt(
+	detail: JiraIssueDetail,
+	contributing = '',
+	clarifications = '',
+	axonHint = '',
+): string {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
 	const description = getDescriptionText(detail);
@@ -209,6 +214,10 @@ export function buildWorkPrompt(detail: JiraIssueDetail, contributing = '', clar
 
 	if (contributing) {
 		sections.push('', '--- CONTRIBUTING.MD ---', contributing, '--- END CONTRIBUTING.MD ---');
+	}
+
+	if (axonHint) {
+		sections.push(axonHint);
 	}
 
 	if (clarifications) {
