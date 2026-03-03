@@ -184,6 +184,7 @@ export function buildWorkPrompt(
 	contributing = '',
 	clarifications = '',
 	axonHint = '',
+	figmaSection = '',
 ): string {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
@@ -214,6 +215,10 @@ export function buildWorkPrompt(
 
 	if (contributing) {
 		sections.push('', '--- CONTRIBUTING.MD ---', contributing, '--- END CONTRIBUTING.MD ---');
+	}
+
+	if (figmaSection) {
+		sections.push(figmaSection);
 	}
 
 	if (axonHint) {
