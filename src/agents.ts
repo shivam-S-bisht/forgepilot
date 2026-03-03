@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import chalk from 'chalk';
+import { getAxonPromptHint, logAxonStatus } from './axon.js';
+import { fetchFigmaDesignContext } from './figma.js';
 import { prepareRepoForWork, readContributing } from './git.js';
 import { transitionIssueToInProgress } from './jira.js';
-import { getAxonPromptHint, logAxonStatus } from './axon.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { notifySlackStatus } from './slack.js';
@@ -29,14 +30,10 @@ async function runCommandInteractive(command: string, args: string[], toolName: 
 }
 
 async function runCopilotForTicket(
-	detail: JiraIssueDetail,
+	prompt: string,
 	repoPath: string,
-	contributing: string,
 	autonomous: boolean,
-	clarifications: string,
-	axonHint: string,
 ): Promise<void> {
-	const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint);
 	const args = autonomous
 		? ['-p', prompt, '--autopilot', '--allow-all-tools', '--allow-all-paths', '--add-dir', repoPath]
 		: ['-i', prompt, '--add-dir', repoPath];
@@ -44,26 +41,18 @@ async function runCopilotForTicket(
 }
 
 async function runRovoForTicket(
-	detail: JiraIssueDetail,
+	prompt: string,
 	repoPath: string,
-	contributing: string,
-	clarifications: string,
-	axonHint: string,
+	jiraUrl: string,
 ): Promise<void> {
-	const jiraUrl = getJiraBrowseUrl(detail);
-	const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint);
 	const args = ['rovodev', 'run', '--yolo', '--jira', jiraUrl, prompt];
 	await runCommandInteractive('acli', args, 'Rovo', repoPath);
 }
 
 async function runCursorForTicket(
-	detail: JiraIssueDetail,
+	prompt: string,
 	repoPath: string,
-	contributing: string,
-	clarifications: string,
-	axonHint: string,
 ): Promise<void> {
-	const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint);
 	const args = ['agent', '--yolo', '--workspace', repoPath, '-p', prompt];
 	await runCommandInteractive('cursor', args, 'Cursor Agent', repoPath);
 }
@@ -103,6 +92,9 @@ export async function launchAgentForRepos(
 	const firstRepoContributing = await readContributing(paths[0]);
 	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
 	const clarifications = formatClarifications(preflight);
+
+	const figmaSection = await fetchFigmaDesignContext(detail);
+
 	await transitionIssueToInProgress(detail);
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
 
@@ -119,19 +111,20 @@ export async function launchAgentForRepos(
 			const axonHint = getAxonPromptHint(repoPath);
 			logAxonStatus(repoPath);
 
+			const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
 			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
 			switch (agentOption.id) {
 				case 'copilot-autonomous':
-					await runCopilotForTicket(detail, repoPath, contributing, true, clarifications, axonHint);
+					await runCopilotForTicket(prompt, repoPath, true);
 					break;
 				case 'copilot-interactive':
-					await runCopilotForTicket(detail, repoPath, contributing, false, clarifications, axonHint);
+					await runCopilotForTicket(prompt, repoPath, false);
 					break;
 				case 'rovo-autonomous':
-					await runRovoForTicket(detail, repoPath, contributing, clarifications, axonHint);
+					await runRovoForTicket(prompt, repoPath, getJiraBrowseUrl(detail));
 					break;
 				case 'cursor-autonomous':
-					await runCursorForTicket(detail, repoPath, contributing, clarifications, axonHint);
+					await runCursorForTicket(prompt, repoPath);
 					break;
 			}
 		} catch (error) {
