@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import chalk from 'chalk';
 import { prepareRepoForWork, readContributing } from './git.js';
+import { transitionIssueToInProgress } from './jira.js';
 import { getAxonPromptHint, logAxonStatus } from './axon.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
@@ -102,6 +103,7 @@ export async function launchAgentForRepos(
 	const firstRepoContributing = await readContributing(paths[0]);
 	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
 	const clarifications = formatClarifications(preflight);
+	await transitionIssueToInProgress(detail);
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
 
 	for (const repoPath of paths) {

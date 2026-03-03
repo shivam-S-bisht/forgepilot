@@ -53,3 +53,24 @@ export async function fetchTicketsByJql(jql: string): Promise<TicketView[]> {
 export async function fetchIssueDetail(issueKey: string): Promise<JiraIssueDetail> {
 	return runAcliJson<JiraIssueDetail>(['jira', 'workitem', 'view', issueKey, '--fields', '*all', '--json']);
 }
+
+function isProgressStatus(status: string | undefined): boolean {
+	if (!status) return false;
+	return status.toLowerCase().includes('progress');
+}
+
+export async function transitionIssueToInProgress(detail: JiraIssueDetail): Promise<void> {
+	const currentStatus = detail.fields.status?.name;
+	if (isProgressStatus(currentStatus)) return;
+	await runAcliJson([
+		'jira',
+		'workitem',
+		'transition',
+		'--key',
+		detail.key,
+		'--status',
+		'In Progress',
+		'--yes',
+		'--json',
+	]);
+}

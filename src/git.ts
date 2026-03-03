@@ -24,28 +24,6 @@ export async function gitExec(repoPath: string, args: string[]): Promise<string>
 	return stdout.trim();
 }
 
-async function detectDefaultBranch(repoPath: string): Promise<string> {
-	try {
-		const ref = await gitExec(repoPath, ['symbolic-ref', 'refs/remotes/origin/HEAD']);
-		return ref.replace('refs/remotes/origin/', '');
-	} catch {
-		// Fallback: check if main or master exists.
-	}
-	try {
-		await gitExec(repoPath, ['rev-parse', '--verify', 'origin/main']);
-		return 'main';
-	} catch {
-		// Not main.
-	}
-	try {
-		await gitExec(repoPath, ['rev-parse', '--verify', 'origin/master']);
-		return 'master';
-	} catch {
-		// Not master either.
-	}
-	return 'main';
-}
-
 export async function prepareRepoForWork(repoPath: string, ticketKey: string): Promise<void> {
 	const branchName = ticketKey.toLowerCase();
 
@@ -63,29 +41,17 @@ export async function prepareRepoForWork(repoPath: string, ticketKey: string): P
 		console.log(chalk.yellow('  Warning: fetch failed, continuing with local state.'));
 	}
 
-	const defaultBranch = await detectDefaultBranch(repoPath);
-	console.log(chalk.gray(`  Checking out ${defaultBranch} and pulling...`));
-	await gitExec(repoPath, ['checkout', defaultBranch]);
-	try {
-		await gitExec(repoPath, ['pull', '--ff-only']);
-	} catch {
-		console.log(chalk.yellow(`  Warning: pull --ff-only failed on ${defaultBranch}, continuing.`));
-	}
-
-	const existingBranches = await gitExec(repoPath, ['branch', '--list', branchName]);
-	let existedBefore = false;
-	if (existingBranches) {
-		existedBefore = true;
-		console.log(chalk.gray(`  Switching to existing branch ${branchName}...`));
-		await gitExec(repoPath, ['checkout', branchName]);
+	const currentBranch = await gitExec(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+	const isDetached = currentBranch === 'HEAD';
+	if (isDetached) {
+		console.log(chalk.yellow('  Warning: detached HEAD; staying on current commit.'));
+	} else {
+		console.log(chalk.gray(`  Using current branch ${currentBranch}...`));
 		try {
 			await gitExec(repoPath, ['pull', '--ff-only']);
 		} catch {
-			console.log(chalk.yellow(`  Warning: pull --ff-only failed on ${branchName}, continuing.`));
+			console.log(chalk.yellow(`  Warning: pull --ff-only failed on ${currentBranch}, continuing.`));
 		}
-	} else {
-		console.log(chalk.gray(`  Creating new branch ${branchName}...`));
-		await gitExec(repoPath, ['checkout', '-b', branchName]);
 	}
 
 	const cacheKey = `branch-state-${ticketKey.toLowerCase()}`;
@@ -93,14 +59,14 @@ export async function prepareRepoForWork(repoPath: string, ticketKey: string): P
 	branchState[repoPath] = {
 		ticketKey,
 		repoPath,
-		branchName,
-		existedBefore,
-		action: existedBefore ? 'reused' : 'created',
+		branchName: isDetached ? '(detached)' : currentBranch,
+		existedBefore: true,
+		action: 'reused',
 		lastPreparedAt: new Date().toISOString(),
 	};
 	await setCached(cacheKey, branchState);
 
-	console.log(chalk.green(`  Ready on branch ${branchName}`));
+	console.log(chalk.green(`  Ready on branch ${isDetached ? '(detached)' : currentBranch}`));
 }
 
 export async function readContributing(repoPath: string): Promise<string> {
