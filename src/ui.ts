@@ -13,6 +13,32 @@ const LIST_PAGE_SIZE = 20;
 
 export { LIST_PAGE_SIZE };
 
+export interface ScopeOption {
+	id: string;
+	label: string;
+	description: string;
+}
+
+export function renderScopePicker(options: ScopeOption[], selectedIndex: number) {
+	clearScreen();
+	console.log(chalk.bold('ForgePilot'));
+	console.log(chalk.gray('Which tickets do you want to work with?'));
+	console.log(chalk.gray('Use ↑/↓ to navigate, Enter to select.'));
+	console.log(chalk.gray('='.repeat(60)));
+	console.log();
+	for (let i = 0; i < options.length; i++) {
+		const opt = options[i];
+		const isSelected = i === selectedIndex;
+		const pointer = isSelected ? chalk.bold.cyan('▶') : ' ';
+		const label = isSelected ? chalk.bold.white(opt.label) : chalk.white(opt.label);
+		const desc = chalk.gray(opt.description);
+		console.log(`${pointer} ${label}`);
+		console.log(`  ${desc}`);
+	}
+	console.log();
+	console.log(chalk.gray('='.repeat(60)));
+}
+
 export function clearScreen() {
 	process.stdout.write('\x1Bc');
 }

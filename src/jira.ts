@@ -1,7 +1,11 @@
 import { runAcliJson } from './acli.js';
 import type { JiraBoard, JiraIssueDetail, JiraIssueSummary, TicketView } from './types.js';
 
-const DEFAULT_TICKETS_JQL =
+export type TicketScope = 'current-sprint' | 'all-assigned';
+
+const CURRENT_SPRINT_JQL =
+	'assignee = currentUser() AND sprint in openSprints() AND issuetype NOT IN subTaskIssueTypes() AND resolution = Unresolved ORDER BY updated DESC';
+const ALL_ASSIGNED_JQL =
 	'assignee = currentUser() AND issuetype NOT IN subTaskIssueTypes() AND resolution = Unresolved ORDER BY updated DESC';
 export const LOAD_MORE_TICKETS_JQL =
 	'assignee = currentUser() AND issuetype NOT IN subTaskIssueTypes() ORDER BY updated DESC';
@@ -26,8 +30,9 @@ export async function fetchBoards(): Promise<Map<number, string>> {
 	return boardMap;
 }
 
-export async function fetchMyCurrentAndFutureSprintIssues(): Promise<TicketView[]> {
-	return fetchTicketsByJql(DEFAULT_TICKETS_JQL);
+export async function fetchTicketsByScope(scope: TicketScope): Promise<TicketView[]> {
+	const jql = scope === 'current-sprint' ? CURRENT_SPRINT_JQL : ALL_ASSIGNED_JQL;
+	return fetchTicketsByJql(jql);
 }
 
 export async function fetchTicketsByJql(jql: string): Promise<TicketView[]> {
