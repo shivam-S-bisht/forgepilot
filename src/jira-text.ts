@@ -191,42 +191,104 @@ export function buildWorkPrompt(
 	const description = getDescriptionText(detail);
 	const ac = getAcceptanceCriteria(detail);
 	const links = linkedIssuesText(detail);
+	const comments = commentsText(detail);
 
-	const sections = [
-		'Start implementing this Jira ticket in the current repository.',
-		'Follow the repository contribution guidelines strictly.',
+	const sections: string[] = [];
+
+	sections.push(
+		'=== ROLE ===',
+		'You are a senior software engineer implementing a Jira ticket.',
+		'You write production-quality code that follows existing patterns in the codebase.',
+		'You think before you code, explore the repo first, and verify your work.',
 		'',
-		`Ticket: ${detail.key} - ${title}`,
+	);
+
+	sections.push(
+		'=== TASK ===',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
 		`Status: ${status}`,
 		'',
-		'Description:',
-		description,
+	);
+
+	sections.push(
+		'=== WORKFLOW ===',
+		'Follow these steps in order:',
 		'',
-		'Acceptance Criteria:',
-		ac,
+		'1. UNDERSTAND — Read the full ticket context below before writing any code.',
+		'   Identify what is being asked, the scope of changes, and the acceptance criteria.',
 		'',
-		'Linked Tickets:',
-		links,
+		'2. EXPLORE — Examine the existing codebase: file structure, naming conventions,',
+		'   patterns, imports, and how similar features are implemented.',
 		'',
-		'Execution requirements:',
-		'- Follow CONTRIBUTING.md conventions.',
+		'3. PLAN — Decide which files to create or modify. Outline your approach.',
+		'   If the task is complex, break it into smaller steps.',
+		'',
+		'4. IMPLEMENT — Write the code. Follow existing patterns and contribution guidelines.',
+		'   Prefer editing existing files over creating new ones.',
+		'',
+		'5. VERIFY — Run linters, type checks, and tests if the repo has them.',
+		'   Fix any errors you introduced. Ensure the build passes.',
+		'',
+		'6. REVIEW — Self-review your changes against the acceptance criteria.',
+		'   Confirm every AC item is addressed. If something is unclear, add a TODO comment.',
+		'',
+	);
+
+	sections.push(
+		'=== TICKET CONTEXT ===',
+		'',
+		'--- Description ---',
+		description || '(no description)',
+		'',
+		'--- Acceptance Criteria ---',
+		ac || '(none specified)',
+		'',
+	);
+
+	if (links && links !== '(none)') {
+		sections.push('--- Linked Tickets ---', links, '');
+	}
+
+	if (comments && comments !== '(none)') {
+		sections.push('--- Comments (most recent last) ---', comments, '');
+	}
+
+	sections.push(
+		'=== CONSTRAINTS ===',
 		'- Do NOT commit or push any changes. Leave all changes unstaged for manual review.',
-	];
+		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
+		'- Match existing code style: indentation, naming, file organization, and patterns.',
+		'- Prefer editing existing files over creating new ones.',
+		'- If something is ambiguous, add a TODO comment explaining the uncertainty rather than guessing.',
+		'- Handle errors gracefully — no silent failures, no empty catch blocks without reason.',
+		'- If the repo has tests, add or update tests for your changes.',
+		'- Do NOT add unnecessary comments that just narrate what the code does.',
+		'',
+	);
 
 	if (contributing) {
-		sections.push('', '--- CONTRIBUTING.MD ---', contributing, '--- END CONTRIBUTING.MD ---');
+		sections.push(
+			'=== CONTRIBUTING GUIDELINES ===',
+			'Follow these guidelines strictly. They take precedence over general best practices.',
+			'',
+			contributing,
+			'',
+			'=== END CONTRIBUTING GUIDELINES ===',
+			'',
+		);
 	}
 
 	if (figmaSection) {
-		sections.push(figmaSection);
+		sections.push(figmaSection, '');
 	}
 
 	if (axonHint) {
-		sections.push(axonHint);
+		sections.push(axonHint, '');
 	}
 
 	if (clarifications) {
-		sections.push('', clarifications);
+		sections.push(clarifications, '');
 	}
 
 	return sections.join('\n');
