@@ -100,8 +100,12 @@ export function renderPostAgentPrompt(ticket: TicketView, message: string) {
 	console.log(chalk.bold(`Agent Finished: ${ticket.key} - ${ticket.title}`));
 	console.log(chalk.gray('='.repeat(90)));
 	console.log(message);
-	console.log(chalk.gray('\nGo back to ticket listing?'));
-	console.log(chalk.gray('Press r to retry same agent, b to go back to listing, d to stay in ticket details.'));
+	console.log();
+	console.log(chalk.white('  p  Push branch & create MR/PR'));
+	console.log(chalk.white('  r  Retry same agent'));
+	console.log(chalk.white('  d  Back to ticket details'));
+	console.log(chalk.white('  b  Back to ticket listing'));
+	console.log(chalk.gray('='.repeat(90)));
 }
 
 export function renderList(tickets: TicketView[], selectedIndex: number, expandedScope = false) {
