@@ -179,6 +179,65 @@ When you select a ticket and launch an agent, ForgePilot:
 9. **Notifies Slack** — sends status updates on start, completion, or failure
 10. **Post-agent options** — push branch, create MR/PR (auto-detects GitHub/GitLab), retry, or go back
 
+## MCP Server
+
+ForgePilot includes an MCP (Model Context Protocol) server that exposes all its capabilities as tools for AI agents like Cursor, Claude Desktop, Copilot, and others.
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_tickets` | Fetch tickets by scope (current sprint / all assigned) |
+| `search_tickets` | Run a custom JQL query |
+| `get_ticket_details` | Full ticket details (description, AC, comments, links) |
+| `transition_ticket` | Move a ticket to "In Progress" |
+| `get_boards` | List all visible Jira boards |
+| `list_local_repos` | Scan a directory for git repositories |
+| `resolve_repos` | Match ticket repo URLs to local repos |
+| `prepare_branch` | Stash, fetch, checkout base, create ticket branch |
+| `get_branch_status` | Current branch, uncommitted changes, recent commits |
+| `commit_changes` | Stage and commit changes |
+| `push_and_create_pr` | Push branch and create PR/MR (auto-detects GitHub/GitLab) |
+| `get_figma_context` | Fetch Figma design data for a ticket |
+| `get_axon_context` | Get Axon knowledge graph hint for a repo |
+| `get_contributing_guidelines` | Read CONTRIBUTING.md / AGENTS.md from a repo |
+| `build_prompt` | Build the full structured AI prompt for a ticket |
+| `cache_get` | Read a value from the ForgePilot cache |
+| `cache_set` | Write a value to the cache |
+| `cache_list` | List all cached keys and values |
+| `cache_clear` | Clear the entire cache |
+| `work_on_ticket` | All-in-one: resolve repos, prepare branches, build prompt, transition ticket |
+
+### Setup for Cursor
+
+Add to `.cursor/mcp.json` in your project or global config:
+
+```json
+{
+  "mcpServers": {
+    "forgepilot": {
+      "command": "forgepilot-mcp"
+    }
+  }
+}
+```
+
+### Setup for Claude Desktop
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "forgepilot": {
+      "command": "forgepilot-mcp"
+    }
+  }
+}
+```
+
+The MCP server uses the same `FORGEPILOT_*` environment variables as the CLI. Make sure `FORGEPILOT_JIRA_BASE_URL`, `FORGEPILOT_JIRA_EMAIL`, and `FORGEPILOT_JIRA_API_TOKEN` are set in your shell environment.
+
 ## Release Flow
 
 Uses `standard-version` for SemVer + changelog:

@@ -7,7 +7,8 @@ ForgePilot is a TypeScript CLI tool that automates coding agent interactions wit
 ## Architecture
 
 ```
-index.ts          → Entry point: scope picker → ticket fetch → interactive CLI
+index.ts          → CLI entry point: scope picker → ticket fetch → interactive CLI
+mcp-server.ts     → MCP server entry point: exposes all tools via stdio transport
 src/
   cli.ts          → Interactive TUI: ticket list, detail view, agent picker, post-agent actions
   ui.ts           → Render functions for all TUI screens (list, details, pickers, prompts)

@@ -1,0 +1,557 @@
+#!/usr/bin/env node
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { activateAxonVenv, getAxonPromptHint, startAxonWatch } from './src/axon.js';
+import { clearCache, getAllCache, getCached, setCached } from './src/cache.js';
+import { fetchFigmaDesignContext } from './src/figma.js';
+import { gitExec, prepareRepoForWork, pushBranchAndCreateMR, readContributing } from './src/git.js';
+import { fetchBoards, fetchIssueDetail, fetchTicketsByJql, fetchTicketsByScope, transitionIssueToInProgress } from './src/jira.js';
+import type { TicketScope } from './src/jira.js';
+import { buildWorkPrompt, getAcceptanceCriteria, getDescriptionText, getJiraBrowseUrl, linkedIssuesText, commentsText } from './src/jira-text.js';
+import { extractRepoLabels, getRemoteUrls, scanLocalRepos } from './src/repo.js';
+
+activateAxonVenv();
+
+const server = new McpServer({
+	name: 'forgepilot',
+	version: '1.0.0',
+});
+
+// ---------------------------------------------------------------------------
+// Jira Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'list_tickets',
+	'Fetch Jira tickets assigned to the current user. Use scope "current-sprint" for active sprint or "all-assigned" for all unresolved tickets.',
+	{
+		scope: z.enum(['current-sprint', 'all-assigned']).default('current-sprint').describe('Ticket scope to fetch'),
+	},
+	async ({ scope }) => {
+		const tickets = await fetchTicketsByScope(scope as TicketScope);
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(tickets, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'search_tickets',
+	'Search Jira tickets using a custom JQL query. Returns key, title, and status for each match.',
+	{
+		jql: z.string().describe('JQL query string (e.g. "project = CE AND status = Open")'),
+	},
+	async ({ jql }) => {
+		const tickets = await fetchTicketsByJql(jql);
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(tickets, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'get_ticket_details',
+	'Fetch full details for a Jira ticket including description, acceptance criteria, comments, and linked issues.',
+	{
+		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
+	},
+	async ({ ticket_key }) => {
+		const detail = await fetchIssueDetail(ticket_key);
+		const description = getDescriptionText(detail);
+		const ac = getAcceptanceCriteria(detail);
+		const links = linkedIssuesText(detail);
+		const comments = commentsText(detail);
+		const url = getJiraBrowseUrl(detail);
+
+		const result = {
+			key: detail.key,
+			title: detail.fields.summary ?? '(no title)',
+			status: detail.fields.status?.name ?? 'Unknown',
+			url,
+			description,
+			acceptanceCriteria: ac,
+			linkedIssues: links,
+			comments,
+		};
+
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(result, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'transition_ticket',
+	'Transition a Jira ticket to a new status. If target_status is not provided, transitions to "In Progress".',
+	{
+		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
+		target_status: z.string().optional().describe('Target status name (default: "In Progress")'),
+	},
+	async ({ ticket_key, target_status }) => {
+		const detail = await fetchIssueDetail(ticket_key);
+
+		if (!target_status || target_status.toLowerCase().includes('progress')) {
+			await transitionIssueToInProgress(detail);
+			return {
+				content: [{ type: 'text', text: `Ticket ${ticket_key} transitioned to In Progress.` }],
+			};
+		}
+
+		return {
+			content: [{ type: 'text', text: `Only "In Progress" transition is currently supported. Use target_status containing "progress".` }],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Repo Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'list_local_repos',
+	'Scan a directory for local git repositories. Returns paths of all git repos found.',
+	{
+		root_dir: z.string().describe('Root directory to scan for git repos (e.g. "~/dev")'),
+	},
+	async ({ root_dir }) => {
+		const resolved = root_dir.replace(/^~/, process.env.HOME ?? '~');
+		const repos = await scanLocalRepos(resolved);
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(repos, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'resolve_repos',
+	'Extract repository URLs from a Jira ticket description and match them to local repos under a root directory.',
+	{
+		ticket_key: z.string().describe('Jira ticket key to extract repo URLs from'),
+		root_dir: z.string().describe('Root directory containing local repos'),
+	},
+	async ({ ticket_key, root_dir }) => {
+		const detail = await fetchIssueDetail(ticket_key);
+		const description = getDescriptionText(detail);
+		const ticketRepos = extractRepoLabels(description);
+
+		const resolved = root_dir.replace(/^~/, process.env.HOME ?? '~');
+		const localRepoPaths = await scanLocalRepos(resolved);
+
+		const remoteIndex = new Map<string, string>();
+		for (const localPath of localRepoPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+			}
+		}
+
+		const matched: Record<string, string> = {};
+		const unmatched: string[] = [];
+
+		for (const repo of ticketRepos) {
+			const localPath = remoteIndex.get(repo.normalizedUrl);
+			if (localPath) {
+				matched[repo.label] = localPath;
+			} else {
+				unmatched.push(repo.label);
+			}
+		}
+
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify({
+					ticketRepos: ticketRepos.map((r) => ({ label: r.label, url: r.normalizedUrl })),
+					matched,
+					unmatched,
+					localRepoCount: localRepoPaths.length,
+				}, null, 2),
+			}],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Git Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'prepare_branch',
+	'Prepare a git repo for work on a ticket: stash changes, fetch latest, checkout base branch, create/checkout ticket branch. Returns the branch name and effective working path.',
+	{
+		repo_path: z.string().describe('Absolute path to the local git repository'),
+		ticket_key: z.string().describe('Jira ticket key (used as branch name, e.g. "CE-1234" → branch "CE-1234")'),
+		use_worktree: z.boolean().default(false).describe('If true, creates an isolated git worktree instead of switching branches in-place'),
+	},
+	async ({ repo_path, ticket_key, use_worktree }) => {
+		const effectivePath = await prepareRepoForWork(repo_path, ticket_key, use_worktree);
+		const branch = ticket_key.toUpperCase();
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify({ branch, effectivePath, worktree: use_worktree }, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'get_branch_status',
+	'Get the current git status of a repository: branch name, uncommitted changes, and recent commit log.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository'),
+	},
+	async ({ repo_path }) => {
+		const branch = await gitExec(repo_path, ['branch', '--show-current']);
+		const status = await gitExec(repo_path, ['status', '--porcelain']);
+		let log = '';
+		try {
+			log = await gitExec(repo_path, ['log', '--oneline', '-10']);
+		} catch {
+			// No commits yet.
+		}
+
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify({
+					branch,
+					uncommittedChanges: status ? status.split('\n') : [],
+					recentCommits: log ? log.split('\n') : [],
+				}, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'commit_changes',
+	'Stage all changes and create a git commit in the specified repository.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository'),
+		message: z.string().describe('Commit message'),
+		stage_all: z.boolean().default(true).describe('If true, stages all changes (git add -A) before committing'),
+	},
+	async ({ repo_path, message, stage_all }) => {
+		if (stage_all) {
+			await gitExec(repo_path, ['add', '-A']);
+		}
+		await gitExec(repo_path, ['commit', '-m', message]);
+		const hash = await gitExec(repo_path, ['rev-parse', '--short', 'HEAD']);
+		return {
+			content: [{ type: 'text', text: `Committed: ${hash} — ${message}` }],
+		};
+	},
+);
+
+server.tool(
+	'push_and_create_pr',
+	'Push the current branch to remote and create a Pull Request (GitHub) or Merge Request (GitLab). Auto-detects the platform.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository'),
+		ticket_key: z.string().describe('Jira ticket key (used in PR/MR title)'),
+		title: z.string().describe('PR/MR title (ticket key will be prepended)'),
+	},
+	async ({ repo_path, ticket_key, title }) => {
+		let jiraUrl = '';
+		try {
+			const detail = await fetchIssueDetail(ticket_key);
+			jiraUrl = getJiraBrowseUrl(detail);
+		} catch {
+			// Non-critical, continue without Jira URL.
+		}
+
+		const url = await pushBranchAndCreateMR(repo_path, ticket_key, title, jiraUrl);
+		return {
+			content: [{
+				type: 'text',
+				text: url ? `PR/MR created: ${url}` : 'Branch pushed but no PR/MR URL returned (platform not detected as GitHub or GitLab).',
+			}],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Context Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'get_figma_context',
+	'Fetch Figma design data for a ticket. Extracts Figma links from the ticket, fetches node structure, rendered images, and design tokens. Requires FORGEPILOT_FIGMA_PAT to be set.',
+	{
+		ticket_key: z.string().describe('Jira ticket key to extract Figma links from'),
+	},
+	async ({ ticket_key }) => {
+		const detail = await fetchIssueDetail(ticket_key);
+		const context = await fetchFigmaDesignContext(detail);
+		return {
+			content: [{
+				type: 'text',
+				text: context || 'No Figma design context found for this ticket.',
+			}],
+		};
+	},
+);
+
+server.tool(
+	'get_axon_context',
+	'Get the Axon knowledge graph structural reasoning hint for a repository. Returns the Axon protocol prompt section if an .axon/ graph exists in the repo.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository'),
+	},
+	async ({ repo_path }) => {
+		const hint = getAxonPromptHint(repo_path);
+		return {
+			content: [{
+				type: 'text',
+				text: hint || 'No Axon knowledge graph found at .axon/ in this repository.',
+			}],
+		};
+	},
+);
+
+server.tool(
+	'get_contributing_guidelines',
+	'Read the CONTRIBUTING.md or AGENTS.md file from a repository. Returns the content (up to 12KB) for use as coding guidelines.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository'),
+	},
+	async ({ repo_path }) => {
+		const content = await readContributing(repo_path);
+		return {
+			content: [{
+				type: 'text',
+				text: content || 'No CONTRIBUTING.md or AGENTS.md found in this repository.',
+			}],
+		};
+	},
+);
+
+server.tool(
+	'build_prompt',
+	'Build the full structured AI prompt for a Jira ticket. Combines ticket context, contributing guidelines, Figma designs, Axon hints, and any cached clarifications into a single prompt.',
+	{
+		ticket_key: z.string().describe('Jira ticket key'),
+		repo_path: z.string().describe('Absolute path to the primary repository (for contributing guidelines and Axon)'),
+	},
+	async ({ ticket_key, repo_path }) => {
+		const detail = await fetchIssueDetail(ticket_key);
+		const contributing = await readContributing(repo_path);
+		const axonHint = getAxonPromptHint(repo_path);
+		const figmaSection = await fetchFigmaDesignContext(detail);
+
+		const prompt = buildWorkPrompt(detail, contributing, '', axonHint, figmaSection);
+		return {
+			content: [{ type: 'text', text: prompt }],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Memory / Cache Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'cache_get',
+	'Read a value from the ForgePilot cache by key. Returns null if the key does not exist.',
+	{
+		key: z.string().describe('Cache key (e.g. "rootDir", "repoChoice_CE-1234", "branch-state-CE-1234")'),
+	},
+	async ({ key }) => {
+		const value = await getCached(key);
+		return {
+			content: [{
+				type: 'text',
+				text: value !== null ? JSON.stringify(value, null, 2) : 'null (key not found in cache)',
+			}],
+		};
+	},
+);
+
+server.tool(
+	'cache_set',
+	'Write a value to the ForgePilot cache. Values are persisted as JSON files in the .cache/ directory.',
+	{
+		key: z.string().describe('Cache key'),
+		value: z.string().describe('Value to store (will be parsed as JSON if valid, otherwise stored as string)'),
+	},
+	async ({ key, value }) => {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(value);
+		} catch {
+			parsed = value;
+		}
+		await setCached(key, parsed);
+		return {
+			content: [{ type: 'text', text: `Cached "${key}" successfully.` }],
+		};
+	},
+);
+
+server.tool(
+	'cache_list',
+	'List all keys and values currently stored in the ForgePilot cache.',
+	{},
+	async () => {
+		const all = await getAllCache();
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(all, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'cache_clear',
+	'Clear the entire ForgePilot cache. This removes all cached values.',
+	{},
+	async () => {
+		await clearCache();
+		return {
+			content: [{ type: 'text', text: 'Cache cleared.' }],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Workflow Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'work_on_ticket',
+	'High-level workflow: resolves repos from a ticket, prepares git branches, fetches all context (Figma, Axon, contributing), transitions the ticket to In Progress, and returns the full AI prompt plus repo paths. This is the all-in-one tool to start working on a ticket.',
+	{
+		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
+		root_dir: z.string().describe('Root directory containing local repos (e.g. "~/dev")'),
+		use_worktree: z.boolean().default(false).describe('If true, creates isolated git worktrees for each repo'),
+	},
+	async ({ ticket_key, root_dir, use_worktree }) => {
+		const detail = await fetchIssueDetail(ticket_key);
+
+		const description = getDescriptionText(detail);
+		const ticketRepos = extractRepoLabels(description);
+		const resolvedRoot = root_dir.replace(/^~/, process.env.HOME ?? '~');
+		const localRepoPaths = await scanLocalRepos(resolvedRoot);
+
+		const remoteIndex = new Map<string, string>();
+		for (const localPath of localRepoPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+			}
+		}
+
+		const repoMap = new Map<string, string>();
+		for (const repo of ticketRepos) {
+			const localPath = remoteIndex.get(repo.normalizedUrl);
+			if (localPath) repoMap.set(repo.label, localPath);
+		}
+
+		if (!repoMap.size && localRepoPaths.length) {
+			const cached = await getCached<string[]>(`repoChoice_${ticket_key}`);
+			if (cached?.length) {
+				for (const p of cached) {
+					const name = p.split('/').pop() ?? p;
+					repoMap.set(name, p);
+				}
+			}
+		}
+
+		if (!repoMap.size) {
+			return {
+				content: [{
+					type: 'text',
+					text: JSON.stringify({
+						error: 'No repos resolved. Use resolve_repos or list_local_repos to find repos, then use prepare_branch directly.',
+						availableRepos: localRepoPaths,
+					}, null, 2),
+				}],
+			};
+		}
+
+		const preparedRepos: Record<string, string> = {};
+		for (const [name, repoPath] of repoMap) {
+			const effectivePath = await prepareRepoForWork(repoPath, ticket_key, use_worktree);
+			preparedRepos[name] = effectivePath;
+		}
+
+		const primaryRepoPath = Object.values(preparedRepos)[0];
+		const contributing = await readContributing(primaryRepoPath);
+		const axonHint = getAxonPromptHint(primaryRepoPath);
+		const figmaSection = await fetchFigmaDesignContext(detail);
+
+		const prompt = buildWorkPrompt(detail, contributing, '', axonHint, figmaSection);
+
+		try {
+			await transitionIssueToInProgress(detail);
+		} catch {
+			// Non-critical failure.
+		}
+
+		const axonChild = startAxonWatch(primaryRepoPath);
+		const axonPid = axonChild?.pid ?? null;
+
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify({
+					ticketKey: detail.key,
+					title: detail.fields.summary,
+					status: 'In Progress',
+					branch: ticket_key.toUpperCase(),
+					repos: preparedRepos,
+					jiraUrl: getJiraBrowseUrl(detail),
+					axonWatchPid: axonPid,
+					prompt,
+				}, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'get_boards',
+	'Fetch all Jira boards visible to the current user. Returns board IDs and names.',
+	{},
+	async () => {
+		const boards = await fetchBoards();
+		const result = [...boards.entries()].map(([id, name]) => ({ id, name }));
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(result, null, 2),
+			}],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Start server
+// ---------------------------------------------------------------------------
+
+async function main() {
+	const transport = new StdioServerTransport();
+	await server.connect(transport);
+}
+
+main().catch((error) => {
+	process.stderr.write(`ForgePilot MCP server error: ${error}\n`);
+	process.exit(1);
+});
