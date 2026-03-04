@@ -57,7 +57,7 @@ export function getDescriptionText(detail: JiraIssueDetail): string {
 }
 
 export function getAcceptanceCriteria(detail: JiraIssueDetail): string {
-	const configuredAcField = process.env.JIRA_AC_FIELD?.trim();
+	const configuredAcField = process.env.FORGEPILOT_JIRA_AC_FIELD?.trim();
 	const candidateFields = configuredAcField ? [configuredAcField] : DEFAULT_AC_FIELD_IDS;
 
 	for (const fieldKey of candidateFields) {

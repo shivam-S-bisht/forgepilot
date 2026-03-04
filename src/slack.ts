@@ -30,7 +30,7 @@ function isSlackQaEnabled(): boolean {
 }
 
 function canPostToSlackChannel(): boolean {
-	return !!process.env.SLACK_BOT_TOKEN?.trim() && !!process.env.SLACK_CHANNEL_ID?.trim();
+	return !!process.env.FORGEPILOT_SLACK_BOT_TOKEN?.trim() && !!process.env.FORGEPILOT_SLACK_CHANNEL_ID?.trim();
 }
 
 async function slackApi<T>(endpoint: string, options: RequestInit): Promise<T> {
@@ -89,7 +89,7 @@ function extractUserAnswer(
 }
 
 async function postWebhookNotification(text: string): Promise<void> {
-	const webhookUrl = process.env.SLACK_WEBHOOK_URL?.trim();
+	const webhookUrl = process.env.FORGEPILOT_SLACK_WEBHOOK_URL?.trim();
 	if (!webhookUrl) return;
 	try {
 		await fetch(webhookUrl, {
@@ -126,9 +126,9 @@ export async function askConcernViaSlack(
 	if (!isSlackQaEnabled()) return null;
 
 	const channel = getRequiredEnv('SLACK_CHANNEL_ID');
-	const expectedUserId = process.env.SLACK_EXPECTED_USER_ID?.trim();
-	const pollIntervalMs = Number(process.env.SLACK_POLL_INTERVAL_MS ?? '5000');
-	const timeoutMs = Number(process.env.SLACK_ANSWER_TIMEOUT_MS ?? `${10 * 60 * 1000}`);
+	const expectedUserId = process.env.FORGEPILOT_SLACK_EXPECTED_USER_ID?.trim();
+	const pollIntervalMs = Number(process.env.FORGEPILOT_SLACK_POLL_INTERVAL_MS ?? '5000');
+	const timeoutMs = Number(process.env.FORGEPILOT_SLACK_ANSWER_TIMEOUT_MS ?? `${10 * 60 * 1000}`);
 
 	const lines = [
 		':robot_face: *ForgePilot Preflight*',

@@ -85,7 +85,7 @@ export function extractFigmaLinks(detail: JiraIssueDetail): string[] {
 	sources.push(getAcceptanceCriteria(detail));
 	sources.push(commentsText(detail));
 
-	const figmaFieldKey = process.env.JIRA_FIGMA_FIELD?.trim();
+	const figmaFieldKey = process.env.FORGEPILOT_JIRA_FIGMA_FIELD?.trim();
 	if (figmaFieldKey) {
 		const fieldValue = detail.fields[figmaFieldKey];
 		if (fieldValue) {
@@ -278,7 +278,7 @@ function summarizeNode(
 // ---------------------------------------------------------------------------
 
 function figmaHeaders(): Record<string, string> {
-	return { 'X-Figma-Token': process.env.FIGMA_PAT?.trim() ?? '' };
+	return { 'X-Figma-Token': process.env.FORGEPILOT_FIGMA_PAT?.trim() ?? '' };
 }
 
 async function apiFetch<T>(url: string, label: string): Promise<{ data: T; elapsed: number } | null> {
@@ -491,7 +491,7 @@ export async function fetchFigmaDesignContext(detail: JiraIssueDetail): Promise<
 		console.log(chalk.cyan(`    ${link}`));
 	}
 
-	const token = process.env.FIGMA_PAT?.trim();
+	const token = process.env.FORGEPILOT_FIGMA_PAT?.trim();
 	if (!token) {
 		console.log(chalk.yellow('  FIGMA_PAT not set — including links as plain URLs in prompt.'));
 		return buildPlainLinkSection(links);
