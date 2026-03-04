@@ -4,13 +4,13 @@
   "path": "/Users/shivam.bisht/dev/repo-agent-cli",
   "stats": {
     "files": 17,
-    "symbols": 126,
-    "relationships": 553,
+    "symbols": 147,
+    "relationships": 635,
     "clusters": 11,
-    "flows": 17,
+    "flows": 23,
     "dead_code": 3,
-    "coupled_pairs": 55,
-    "embeddings": 143
+    "coupled_pairs": 42,
+    "embeddings": 164
   },
-  "last_indexed_at": "2026-03-03T15:49:19.896058+00:00"
+  "last_indexed_at": "2026-03-04T12:51:44.358884+00:00"
 }
