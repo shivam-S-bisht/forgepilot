@@ -82,6 +82,9 @@ function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 
 function printActiveConfig() {
 	const vars: [string, string | undefined][] = [
+		['FORGEPILOT_JIRA_BASE_URL', process.env.FORGEPILOT_JIRA_BASE_URL],
+		['FORGEPILOT_JIRA_EMAIL', process.env.FORGEPILOT_JIRA_EMAIL],
+		['FORGEPILOT_JIRA_API_TOKEN', process.env.FORGEPILOT_JIRA_API_TOKEN ? '***' : undefined],
 		['FORGEPILOT_TICKET_SCOPE', process.env.FORGEPILOT_TICKET_SCOPE],
 		['FORGEPILOT_DEFAULT_AGENT', process.env.FORGEPILOT_DEFAULT_AGENT],
 		['FORGEPILOT_AUTO_ALL_TICKETS', process.env.FORGEPILOT_AUTO_ALL_TICKETS],
@@ -132,7 +135,7 @@ async function main() {
 
 		const scopeLabel = SCOPE_OPTIONS.find((o) => o.id === scope)?.label ?? scope;
 		console.log(chalk.bold(`\nFetching ${scopeLabel.toLowerCase()}...`));
-		console.log(chalk.gray('Using authenticated acli session'));
+		console.log(chalk.gray('Using Jira REST API'));
 
 		const [boards, tickets] = await Promise.all([fetchBoards(), fetchTicketsByScope(scope)]);
 
@@ -158,7 +161,7 @@ async function main() {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(`Error: ${message}`);
-		console.error('\nMake sure `acli auth login` is completed and Jira access is available.');
+		console.error('\nMake sure FORGEPILOT_JIRA_BASE_URL, FORGEPILOT_JIRA_EMAIL, and FORGEPILOT_JIRA_API_TOKEN are set.');
 		process.exit(1);
 	}
 }

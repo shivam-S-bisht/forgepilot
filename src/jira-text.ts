@@ -1,3 +1,4 @@
+import { getJiraBaseUrl } from './jira-client.js';
 import type { JiraIssueDetail, SprintInfo } from './types.js';
 
 const DEFAULT_AC_FIELD_IDS = ['customfield_13223', 'customfield_10039'];
@@ -176,7 +177,8 @@ export function getJiraBrowseUrl(detail: JiraIssueDetail): string {
 			// Ignore parse errors and use fallback.
 		}
 	}
-	return `https://clubautomation.atlassian.net/browse/${detail.key}`;
+	const base = getJiraBaseUrl();
+	return base ? `${base}/browse/${detail.key}` : `https://clubautomation.atlassian.net/browse/${detail.key}`;
 }
 
 export function buildWorkPrompt(

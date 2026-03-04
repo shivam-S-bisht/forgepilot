@@ -11,7 +11,8 @@ index.ts          → Entry point: scope picker → ticket fetch → interactive
 src/
   cli.ts          → Interactive TUI: ticket list, detail view, agent picker, post-agent actions
   ui.ts           → Render functions for all TUI screens (list, details, pickers, prompts)
-  jira.ts         → Jira API calls via acli (fetch tickets, boards, transitions)
+  jira.ts         → Jira API calls via REST API (fetch tickets, boards, transitions)
+  jira-client.ts  → Jira REST API HTTP client (fetch with Basic Auth)
   jira-text.ts    → Ticket text extraction, ADF→plaintext, prompt builder (buildWorkPrompt)
   agents.ts       → Agent detection, runner functions, launchAgentForRepos orchestrator
   git.ts          → Git operations: branch creation, stash, push, MR/PR creation
@@ -21,7 +22,6 @@ src/
   preflight.ts    → AI-powered ticket analysis: concern detection, Q&A, caching
   slack.ts        → Slack integration: notifications, threaded Q&A for preflight
   cache.ts        → File-based caching (.cache/ directory, JSON files)
-  acli.ts         → Atlassian CLI wrapper (execFile with JSON parsing)
   types.ts        → Shared TypeScript types
 ```
 

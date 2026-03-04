@@ -393,7 +393,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				if (!agentOptions.length) {
 					clearScreen();
 					console.log(chalk.yellow('No AI agent CLIs found in PATH.'));
-					console.log(chalk.gray('Install one of: copilot, cursor, acli (for Rovo)'));
+					console.log(chalk.gray('Install one of: copilot, cursor, claude, gemini, codex, aider'));
 					console.log(chalk.gray('\nPress any key to go back...'));
 					return;
 				}
@@ -673,7 +673,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				!!process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
 			if (!willSkipDetail) {
 				clearScreen();
-				console.log(`Loading ${selected.key} details via acli...`);
+				console.log(`Loading ${selected.key} details...`);
 			}
 			try {
 				selected.detail = await fetchIssueDetail(selected.key);

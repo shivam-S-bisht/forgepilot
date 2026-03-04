@@ -104,6 +104,9 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `FORGEPILOT_JIRA_BASE_URL` | Jira instance URL (e.g. `https://mycompany.atlassian.net`) | **Required** |
+| `FORGEPILOT_JIRA_EMAIL` | Atlassian account email for API auth | **Required** |
+| `FORGEPILOT_JIRA_API_TOKEN` | Jira API token ([create one here](https://id.atlassian.com/manage-profile/security/api-tokens)) | **Required** |
 | `FORGEPILOT_JIRA_AC_FIELD` | Custom Jira field ID for Acceptance Criteria | *(AC section omitted)* |
 
 ### Axon
@@ -129,9 +132,12 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 
 ### Fully Hands-Free Mode
 
-Set all three for zero-interaction execution:
+Set Jira credentials and automation flags for zero-interaction execution:
 
 ```bash
+export FORGEPILOT_JIRA_BASE_URL="https://mycompany.atlassian.net"
+export FORGEPILOT_JIRA_EMAIL="you@company.com"
+export FORGEPILOT_JIRA_API_TOKEN="ATATT3x..."
 export FORGEPILOT_TICKET_SCOPE="current"
 export FORGEPILOT_DEFAULT_AGENT="copilot-autonomous"
 export FORGEPILOT_AUTO_ALL_TICKETS="true"
