@@ -1,12 +1,44 @@
+import type { ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import chalk from 'chalk';
 
-// When FORGEPILOT_AXON_ENABLED=true we assume the graph is already built (axon analyze .) and lives in .axon/ at repo root.
-// We only inject a prompt hint so the agent uses the graph; we do not run any axon command.
-
 function isAxonEnabled(): boolean {
 	return (process.env.FORGEPILOT_AXON_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+}
+
+export function startAxonWatch(repoPath: string): ChildProcess | null {
+	if (!isAxonEnabled()) return null;
+	const axonDir = path.join(repoPath, '.axon');
+	if (!existsSync(axonDir)) return null;
+
+	try {
+		const child = spawn('axon', ['watch', '.'], {
+			cwd: repoPath,
+			stdio: 'ignore',
+			detached: true,
+		});
+		child.unref();
+		console.log(chalk.gray('  Axon watch started in background.'));
+		return child;
+	} catch {
+		console.log(chalk.yellow('  Warning: could not start axon watch.'));
+		return null;
+	}
+}
+
+export function stopAxonWatch(child: ChildProcess | null): void {
+	if (!child) return;
+	try {
+		if (child.pid) process.kill(-child.pid, 'SIGTERM');
+	} catch {
+		try {
+			child.kill('SIGTERM');
+		} catch {
+			// Already exited.
+		}
+	}
 }
 
 export function getAxonPromptHint(repoPath: string): string {

@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
-import { getAxonPromptHint, logAxonStatus } from './axon.js';
+import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from './axon.js';
 import { fetchFigmaDesignContext } from './figma.js';
 import { prepareRepoForWork, readContributing } from './git.js';
 import { transitionIssueToInProgress } from './jira.js';
@@ -178,7 +178,7 @@ export async function getAvailableAgentOptions(): Promise<WorkAgentOption[]> {
 
 	return ALL_AGENT_OPTIONS
 		.filter((o) => availableSet.has(o.cli))
-		.map(({ cli: _, ...option }) => option);
+		.map(({ cli: __, ...option }) => option);
 }
 
 export async function launchAgentForRepos(
@@ -198,6 +198,7 @@ export async function launchAgentForRepos(
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
 
 	for (const repoPath of paths) {
+		let axonChild: ReturnType<typeof startAxonWatch> = null;
 		try {
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
 			await prepareRepoForWork(repoPath, detail.key);
@@ -209,6 +210,7 @@ export async function launchAgentForRepos(
 
 			const axonHint = getAxonPromptHint(repoPath);
 			logAxonStatus(repoPath);
+			axonChild = startAxonWatch(repoPath);
 
 			const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
 			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
@@ -256,6 +258,8 @@ export async function launchAgentForRepos(
 				`ForgePilot error for ${detail.key} in ${repoPath} using ${agentOption.label}: ${message}`,
 			);
 			throw error;
+		} finally {
+			stopAxonWatch(axonChild);
 		}
 	}
 

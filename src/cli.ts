@@ -1,7 +1,9 @@
 import readline from 'node:readline';
 import chalk from 'chalk';
 import { getAvailableAgentOptions, launchAgentForRepos } from './agents.js';
+import { pushBranchAndCreateMR } from './git.js';
 import { fetchIssueDetail, fetchTicketsByJql, LOAD_MORE_TICKETS_JQL } from './jira.js';
+import { getJiraBrowseUrl } from './jira-text.js';
 import { resolveRepoPathsFromUser } from './repo.js';
 import type { TicketView, WorkAgentOption } from './types.js';
 import { clearScreen, renderAgentPicker, renderDetails, renderList, renderPostAgentPrompt } from './ui.js';
@@ -75,6 +77,38 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					postAgentMessage = launchFailed
 						? chalk.red(`Failed to start ${lastAgentOption.label}: ${launchErrorMessage}`)
 						: chalk.green(`${lastAgentOption.label} finished. Review output and choose next step.`);
+					renderPostAgentPrompt(selectedTicket, postAgentMessage);
+					return;
+				}
+				if (key.name === 'p' && lastResolvedPaths && !launchingAgent) {
+					const selectedTicket = tickets[selectedIndex];
+					const selectedDetail = selectedTicket.detail;
+					if (!selectedDetail) return;
+
+					launchingAgent = true;
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+					clearScreen();
+					console.log(chalk.bold(`Pushing branch & creating MR/PR for ${selectedTicket.key}...`));
+
+					const jiraUrl = getJiraBrowseUrl(selectedDetail);
+					const title = String(selectedDetail.fields.summary ?? selectedTicket.title);
+					const mrUrls: string[] = [];
+
+					try {
+						for (const repoPath of lastResolvedPaths.values()) {
+							const url = await pushBranchAndCreateMR(repoPath, selectedTicket.key, title, jiraUrl);
+							if (url) mrUrls.push(url);
+						}
+						postAgentMessage = mrUrls.length
+							? chalk.green(`MR/PR created:\n${mrUrls.map((u) => `  ${u}`).join('\n')}`)
+							: chalk.yellow('Branch pushed but no MR/PR URL returned.');
+					} catch (error) {
+						postAgentMessage = chalk.red(`Push/MR failed: ${error instanceof Error ? error.message : String(error)}`);
+					} finally {
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
+						launchingAgent = false;
+					}
+
 					renderPostAgentPrompt(selectedTicket, postAgentMessage);
 					return;
 				}
