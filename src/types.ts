@@ -43,7 +43,19 @@ export type TicketView = {
 };
 
 export type WorkAgentOption = {
-	id: 'copilot-autonomous' | 'copilot-interactive' | 'rovo-autonomous' | 'cursor-autonomous';
+	id:
+		| 'copilot-autonomous'
+		| 'copilot-interactive'
+		| 'rovo-autonomous'
+		| 'cursor-autonomous'
+		| 'claude-code-autonomous'
+		| 'claude-code-interactive'
+		| 'gemini-autonomous'
+		| 'codex-autonomous'
+		| 'codex-full-auto'
+		| 'aider-autonomous'
+		| 'opencode-autonomous'
+		| 'cline-autonomous';
 	label: string;
 	description: string;
 };

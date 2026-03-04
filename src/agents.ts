@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus } from './axon.js';
 import { fetchFigmaDesignContext } from './figma.js';
@@ -8,6 +9,8 @@ import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { notifySlackStatus } from './slack.js';
 import type { JiraIssueDetail, WorkAgentOption } from './types.js';
+
+const execFileAsync = promisify(execFile);
 
 async function runCommandInteractive(command: string, args: string[], toolName: string, cwd?: string): Promise<void> {
 	await new Promise<void>((resolve, reject) => {
@@ -49,37 +52,133 @@ async function runRovoForTicket(
 	await runCommandInteractive('acli', args, 'Rovo', repoPath);
 }
 
-async function runCursorForTicket(
-	prompt: string,
-	repoPath: string,
-): Promise<void> {
+async function runCursorForTicket(prompt: string, repoPath: string): Promise<void> {
 	const args = ['agent', '--yolo', '--workspace', repoPath, '-p', prompt];
 	await runCommandInteractive('cursor', args, 'Cursor Agent', repoPath);
 }
 
-export function getWorkAgentOptions(): WorkAgentOption[] {
-	return [
-		{
-			id: 'copilot-autonomous',
-			label: 'Copilot (Autonomous)',
-			description: 'Runs non-interactive with auto approvals.',
-		},
-		{
-			id: 'copilot-interactive',
-			label: 'Copilot (Interactive)',
-			description: 'Starts chat mode with the ticket prompt prefilled.',
-		},
-		{
-			id: 'rovo-autonomous',
-			label: 'Rovo (Autonomous)',
-			description: 'Runs acli rovodev with yolo mode.',
-		},
-		{
-			id: 'cursor-autonomous',
-			label: 'Cursor Agent (Autonomous)',
-			description: 'Runs cursor agent in print + yolo mode.',
-		},
-	];
+async function runClaudeCodeForTicket(prompt: string, repoPath: string, interactive: boolean): Promise<void> {
+	const args = interactive ? [prompt] : ['-p', prompt, '--add-dir', repoPath];
+	await runCommandInteractive('claude', args, 'Claude Code', repoPath);
+}
+
+async function runGeminiForTicket(prompt: string, repoPath: string): Promise<void> {
+	const args = ['-p', prompt];
+	await runCommandInteractive('gemini', args, 'Gemini CLI', repoPath);
+}
+
+async function runCodexForTicket(prompt: string, repoPath: string, fullAuto: boolean): Promise<void> {
+	const args = fullAuto ? ['--full-auto', prompt] : ['--yolo', prompt];
+	await runCommandInteractive('codex', args, 'Codex CLI', repoPath);
+}
+
+async function runAiderForTicket(prompt: string, repoPath: string): Promise<void> {
+	const args = ['--message', prompt, '--yes', '--no-auto-commits'];
+	await runCommandInteractive('aider', args, 'Aider', repoPath);
+}
+
+async function runOpenCodeForTicket(prompt: string, repoPath: string): Promise<void> {
+	const args = ['--prompt', prompt];
+	await runCommandInteractive('opencode', args, 'OpenCode', repoPath);
+}
+
+async function runClineForTicket(prompt: string, repoPath: string): Promise<void> {
+	const args = ['--yolo', prompt];
+	await runCommandInteractive('cline', args, 'Cline CLI', repoPath);
+}
+
+const ALL_AGENT_OPTIONS: (WorkAgentOption & { cli: string })[] = [
+	{
+		id: 'copilot-autonomous',
+		label: 'Copilot (Autonomous)',
+		description: 'Runs non-interactive with auto approvals.',
+		cli: 'copilot',
+	},
+	{
+		id: 'copilot-interactive',
+		label: 'Copilot (Interactive)',
+		description: 'Starts chat mode with the ticket prompt prefilled.',
+		cli: 'copilot',
+	},
+	{
+		id: 'claude-code-autonomous',
+		label: 'Claude Code (Autonomous)',
+		description: 'Runs claude in print mode with prompt.',
+		cli: 'claude',
+	},
+	{
+		id: 'claude-code-interactive',
+		label: 'Claude Code (Interactive)',
+		description: 'Starts interactive session with prompt prefilled.',
+		cli: 'claude',
+	},
+	{
+		id: 'cursor-autonomous',
+		label: 'Cursor Agent (Autonomous)',
+		description: 'Runs cursor agent in yolo mode.',
+		cli: 'cursor',
+	},
+	{
+		id: 'gemini-autonomous',
+		label: 'Gemini CLI (Autonomous)',
+		description: 'Runs Gemini CLI in print mode.',
+		cli: 'gemini',
+	},
+	{
+		id: 'codex-full-auto',
+		label: 'Codex CLI (Full Auto)',
+		description: 'Runs OpenAI Codex with --full-auto flag.',
+		cli: 'codex',
+	},
+	{
+		id: 'codex-autonomous',
+		label: 'Codex CLI (Yolo)',
+		description: 'Runs OpenAI Codex with --yolo flag (no sandbox).',
+		cli: 'codex',
+	},
+	{
+		id: 'aider-autonomous',
+		label: 'Aider (Autonomous)',
+		description: 'Runs aider with --message and --yes flags.',
+		cli: 'aider',
+	},
+	{
+		id: 'opencode-autonomous',
+		label: 'OpenCode (Autonomous)',
+		description: 'Runs opencode with prompt flag.',
+		cli: 'opencode',
+	},
+	{
+		id: 'cline-autonomous',
+		label: 'Cline CLI (Autonomous)',
+		description: 'Runs cline with --yolo auto-approval.',
+		cli: 'cline',
+	},
+	{
+		id: 'rovo-autonomous',
+		label: 'Rovo (Autonomous)',
+		description: 'Runs acli rovodev with yolo mode.',
+		cli: 'acli',
+	},
+];
+
+async function isCLIAvailable(command: string): Promise<boolean> {
+	try {
+		await execFileAsync('command', ['-v', command], { shell: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export async function getAvailableAgentOptions(): Promise<WorkAgentOption[]> {
+	const cliNames = [...new Set(ALL_AGENT_OPTIONS.map((o) => o.cli))];
+	const results = await Promise.all(cliNames.map(async (cli) => ({ cli, available: await isCLIAvailable(cli) })));
+	const availableSet = new Set(results.filter((r) => r.available).map((r) => r.cli));
+
+	return ALL_AGENT_OPTIONS
+		.filter((o) => availableSet.has(o.cli))
+		.map(({ cli: _, ...option }) => option);
 }
 
 export async function launchAgentForRepos(
@@ -120,11 +219,35 @@ export async function launchAgentForRepos(
 				case 'copilot-interactive':
 					await runCopilotForTicket(prompt, repoPath, false);
 					break;
-				case 'rovo-autonomous':
-					await runRovoForTicket(prompt, repoPath, getJiraBrowseUrl(detail));
+				case 'claude-code-autonomous':
+					await runClaudeCodeForTicket(prompt, repoPath, false);
+					break;
+				case 'claude-code-interactive':
+					await runClaudeCodeForTicket(prompt, repoPath, true);
 					break;
 				case 'cursor-autonomous':
 					await runCursorForTicket(prompt, repoPath);
+					break;
+				case 'gemini-autonomous':
+					await runGeminiForTicket(prompt, repoPath);
+					break;
+				case 'codex-full-auto':
+					await runCodexForTicket(prompt, repoPath, true);
+					break;
+				case 'codex-autonomous':
+					await runCodexForTicket(prompt, repoPath, false);
+					break;
+				case 'aider-autonomous':
+					await runAiderForTicket(prompt, repoPath);
+					break;
+				case 'opencode-autonomous':
+					await runOpenCodeForTicket(prompt, repoPath);
+					break;
+				case 'cline-autonomous':
+					await runClineForTicket(prompt, repoPath);
+					break;
+				case 'rovo-autonomous':
+					await runRovoForTicket(prompt, repoPath, getJiraBrowseUrl(detail));
 					break;
 			}
 		} catch (error) {
