@@ -64,3 +64,18 @@ export type RepoLabel = {
 	label: string;
 	normalizedUrl: string;
 };
+
+export type TicketRunStatus = {
+	ticketKey: string;
+	title: string;
+	status: 'queued' | 'running' | 'done' | 'failed';
+	agent: string;
+	repos: string[];
+	error?: string;
+	worktreePaths?: string[];
+};
+
+export type TicketRepoResolution = {
+	repoPaths: Map<string, string>;
+	needsWorktree: Set<string>;
+};

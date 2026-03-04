@@ -1,17 +1,50 @@
 import type { ChildProcess } from 'node:child_process';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import chalk from 'chalk';
 
-function isAxonEnabled(): boolean {
-	return (process.env.FORGEPILOT_AXON_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+let axonActivated = false;
+
+/**
+ * Ensures axon is available in PATH for the current process and all children.
+ * If axon is already in PATH, returns true immediately.
+ * Otherwise, reads FORGEPILOT_AXON_VENV_PATH and prepends its bin/ to PATH.
+ */
+export function activateAxonVenv(): boolean {
+	if (axonActivated) return true;
+
+	try {
+		execFileSync('command', ['-v', 'axon'], { shell: true, stdio: 'ignore' });
+		axonActivated = true;
+		return true;
+	} catch {
+		// Not in PATH, try venv.
+	}
+
+	const venvPath = process.env.FORGEPILOT_AXON_VENV_PATH?.trim();
+	if (!venvPath) return false;
+
+	const resolved = venvPath.replace(/^~/, process.env.HOME ?? '~');
+	const venvBin = path.join(resolved, 'bin');
+	if (!existsSync(path.join(venvBin, 'axon'))) return false;
+
+	process.env.PATH = `${venvBin}:${process.env.PATH}`;
+	axonActivated = true;
+	return true;
+}
+
+function isAxonAvailable(): boolean {
+	return activateAxonVenv();
+}
+
+function hasAxonGraph(repoPath: string): boolean {
+	return existsSync(path.join(repoPath, '.axon'));
 }
 
 export function startAxonWatch(repoPath: string): ChildProcess | null {
-	if (!isAxonEnabled()) return null;
-	const axonDir = path.join(repoPath, '.axon');
-	if (!existsSync(axonDir)) return null;
+	if (!hasAxonGraph(repoPath)) return null;
+	if (!isAxonAvailable()) return null;
 
 	try {
 		const child = spawn('axon', ['watch', '.'], {
@@ -42,9 +75,8 @@ export function stopAxonWatch(child: ChildProcess | null): void {
 }
 
 export function getAxonPromptHint(repoPath: string): string {
-	if (!isAxonEnabled()) return '';
-	const axonDir = path.join(repoPath, '.axon');
-	if (!existsSync(axonDir)) return '';
+	if (!hasAxonGraph(repoPath)) return '';
+	if (!isAxonAvailable()) return '';
 	return [
 		'',
 		'--- AXON STRUCTURAL REASONING PROTOCOL ---',
@@ -90,9 +122,10 @@ export function getAxonPromptHint(repoPath: string): string {
 }
 
 export function logAxonStatus(repoPath: string): void {
-	if (!isAxonEnabled()) return;
-	const axonDir = path.join(repoPath, '.axon');
-	if (existsSync(axonDir)) {
+	if (!hasAxonGraph(repoPath)) return;
+	if (isAxonAvailable()) {
 		console.log(chalk.gray('  Axon graph found at .axon/ — hint added to agent prompt.'));
+	} else {
+		console.log(chalk.yellow('  Axon graph found at .axon/ but axon binary not available. Set FORGEPILOT_AXON_VENV_PATH.'));
 	}
 }

@@ -37,7 +37,67 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
 	}
 }
 
-export async function prepareRepoForWork(repoPath: string, ticketKey: string): Promise<void> {
+function getWorktreeBaseDir(): string {
+	const custom = process.env.FORGEPILOT_WORKTREE_DIR?.trim();
+	if (custom) return custom.replace(/^~/, process.env.HOME ?? '~');
+	return path.join(process.env.HOME ?? '/tmp', '.forgepilot-worktrees');
+}
+
+export function getWorktreePath(repoPath: string, ticketKey: string): string {
+	const repoName = path.basename(repoPath);
+	return path.join(getWorktreeBaseDir(), `${repoName}--${ticketKey.toUpperCase()}`);
+}
+
+export async function createWorktree(repoPath: string, ticketKey: string): Promise<string> {
+	const branchName = ticketKey.toUpperCase();
+	const wtPath = getWorktreePath(repoPath, ticketKey);
+	const baseBranch = getBaseBranch();
+
+	await fs.mkdir(path.dirname(wtPath), { recursive: true });
+
+	console.log(chalk.gray(`  Fetching latest from remote in ${repoPath}...`));
+	try {
+		await gitExec(repoPath, ['fetch', '--prune']);
+	} catch {
+		console.log(chalk.yellow('  Warning: fetch failed, continuing with local state.'));
+	}
+
+	if (existsSync(wtPath)) {
+		console.log(chalk.gray(`  Worktree ${wtPath} already exists, reusing...`));
+		return wtPath;
+	}
+
+	const branchAlreadyExists = await branchExists(repoPath, branchName);
+	if (branchAlreadyExists) {
+		console.log(chalk.gray(`  Creating worktree for existing branch ${branchName}...`));
+		await gitExec(repoPath, ['worktree', 'add', wtPath, branchName]);
+	} else {
+		console.log(chalk.gray(`  Creating worktree with new branch ${branchName} from ${baseBranch}...`));
+		await gitExec(repoPath, ['worktree', 'add', '-b', branchName, wtPath, baseBranch]);
+	}
+
+	console.log(chalk.green(`  Worktree ready at ${wtPath}`));
+	return wtPath;
+}
+
+export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
+	try {
+		await gitExec(repoPath, ['worktree', 'remove', worktreePath, '--force']);
+		console.log(chalk.gray(`  Removed worktree ${worktreePath}`));
+	} catch {
+		console.log(chalk.yellow(`  Warning: could not remove worktree ${worktreePath}`));
+	}
+}
+
+export async function prepareRepoForWork(
+	repoPath: string,
+	ticketKey: string,
+	useWorktree = false,
+): Promise<string> {
+	if (useWorktree) {
+		return createWorktree(repoPath, ticketKey);
+	}
+
 	const branchName = ticketKey.toUpperCase();
 	const baseBranch = getBaseBranch();
 
@@ -90,6 +150,7 @@ export async function prepareRepoForWork(repoPath: string, ticketKey: string): P
 	await setCached(cacheKey, branchState);
 
 	console.log(chalk.green(`  Ready on branch ${branchName}`));
+	return repoPath;
 }
 
 async function detectGitPlatform(repoPath: string): Promise<'github' | 'gitlab' | 'unknown'> {

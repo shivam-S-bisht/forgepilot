@@ -2,8 +2,10 @@
 
 import readline from 'node:readline';
 import chalk from 'chalk';
+import { resolveAgentOptionById } from './src/agents.js';
+import { activateAxonVenv } from './src/axon.js';
 import { getCached, setCached } from './src/cache.js';
-import { startInteractiveCli } from './src/cli.js';
+import { runAutoMode, startInteractiveCli } from './src/cli.js';
 import { fetchBoards, fetchTicketsByScope } from './src/jira.js';
 import type { TicketScope } from './src/jira.js';
 import { renderScopePicker } from './src/ui.js';
@@ -21,6 +23,14 @@ const SCOPE_OPTIONS: ScopeOption[] = [
 		description: 'All unresolved tickets assigned to you across all sprints.',
 	},
 ];
+
+function isAutoMode(): boolean {
+	return (process.env.FORGEPILOT_AUTO_ALL_TICKETS ?? '').trim().toLowerCase() === 'true';
+}
+
+function getDefaultAgentId(): string | undefined {
+	return process.env.FORGEPILOT_DEFAULT_AGENT?.trim() || undefined;
+}
 
 function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 	return new Promise((resolve) => {
@@ -64,8 +74,23 @@ function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 
 async function main() {
 	try {
+		activateAxonVenv();
+
+		const auto = isAutoMode();
+		const defaultAgentId = getDefaultAgentId();
+
 		const cachedScope = await getCached<TicketScope>('ticketScope');
-		const scope = await pickScope(cachedScope);
+		let scope: TicketScope;
+
+		if (auto && cachedScope) {
+			scope = cachedScope;
+			console.log(chalk.gray(`Auto mode: using cached scope "${scope}"`));
+		} else if (auto) {
+			scope = 'current-sprint';
+			console.log(chalk.gray('Auto mode: defaulting to current-sprint scope'));
+		} else {
+			scope = await pickScope(cachedScope);
+		}
 		await setCached('ticketScope', scope);
 
 		const scopeLabel = SCOPE_OPTIONS.find((o) => o.id === scope)?.label ?? scope;
@@ -73,6 +98,25 @@ async function main() {
 		console.log(chalk.gray('Using authenticated acli session'));
 
 		const [boards, tickets] = await Promise.all([fetchBoards(), fetchTicketsByScope(scope)]);
+
+		if (auto && defaultAgentId) {
+			const agentOption = resolveAgentOptionById(defaultAgentId);
+			if (!agentOption) {
+				console.error(chalk.red(`Unknown agent ID: ${defaultAgentId}`));
+				console.error(chalk.gray('Valid IDs: copilot-autonomous, claude-code-autonomous, cursor-autonomous, etc.'));
+				process.exit(1);
+			}
+
+			if (!tickets.length) {
+				console.log(chalk.yellow('No tickets found. Nothing to do.'));
+				process.exit(0);
+			}
+
+			const statuses = await runAutoMode(tickets, agentOption);
+			const failed = statuses.filter((s) => s.status === 'failed').length;
+			process.exit(failed > 0 ? 1 : 0);
+		}
+
 		await startInteractiveCli(tickets, boards);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

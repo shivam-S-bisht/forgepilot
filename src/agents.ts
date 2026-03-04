@@ -3,12 +3,13 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from './axon.js';
 import { fetchFigmaDesignContext } from './figma.js';
-import { prepareRepoForWork, readContributing } from './git.js';
+import { prepareRepoForWork, readContributing, removeWorktree } from './git.js';
 import { transitionIssueToInProgress } from './jira.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
+import { resolveRepoPathsForMultipleTickets } from './repo.js';
 import { notifySlackStatus } from './slack.js';
-import type { JiraIssueDetail, WorkAgentOption } from './types.js';
+import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -181,6 +182,52 @@ export async function getAvailableAgentOptions(): Promise<WorkAgentOption[]> {
 		.map(({ cli: __, ...option }) => option);
 }
 
+async function dispatchAgent(
+	agentOption: WorkAgentOption,
+	prompt: string,
+	repoPath: string,
+	jiraUrl: string,
+): Promise<void> {
+	switch (agentOption.id) {
+		case 'copilot-autonomous':
+			await runCopilotForTicket(prompt, repoPath, true);
+			break;
+		case 'copilot-interactive':
+			await runCopilotForTicket(prompt, repoPath, false);
+			break;
+		case 'claude-code-autonomous':
+			await runClaudeCodeForTicket(prompt, repoPath, false);
+			break;
+		case 'claude-code-interactive':
+			await runClaudeCodeForTicket(prompt, repoPath, true);
+			break;
+		case 'cursor-autonomous':
+			await runCursorForTicket(prompt, repoPath);
+			break;
+		case 'gemini-autonomous':
+			await runGeminiForTicket(prompt, repoPath);
+			break;
+		case 'codex-full-auto':
+			await runCodexForTicket(prompt, repoPath, true);
+			break;
+		case 'codex-autonomous':
+			await runCodexForTicket(prompt, repoPath, false);
+			break;
+		case 'aider-autonomous':
+			await runAiderForTicket(prompt, repoPath);
+			break;
+		case 'opencode-autonomous':
+			await runOpenCodeForTicket(prompt, repoPath);
+			break;
+		case 'cline-autonomous':
+			await runClineForTicket(prompt, repoPath);
+			break;
+		case 'rovo-autonomous':
+			await runRovoForTicket(prompt, repoPath, jiraUrl);
+			break;
+	}
+}
+
 export async function launchAgentForRepos(
 	detail: JiraIssueDetail,
 	agentOption: WorkAgentOption,
@@ -193,6 +240,7 @@ export async function launchAgentForRepos(
 	const clarifications = formatClarifications(preflight);
 
 	const figmaSection = await fetchFigmaDesignContext(detail);
+	const jiraUrl = getJiraBrowseUrl(detail);
 
 	await transitionIssueToInProgress(detail);
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
@@ -214,44 +262,7 @@ export async function launchAgentForRepos(
 
 			const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
 			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
-			switch (agentOption.id) {
-				case 'copilot-autonomous':
-					await runCopilotForTicket(prompt, repoPath, true);
-					break;
-				case 'copilot-interactive':
-					await runCopilotForTicket(prompt, repoPath, false);
-					break;
-				case 'claude-code-autonomous':
-					await runClaudeCodeForTicket(prompt, repoPath, false);
-					break;
-				case 'claude-code-interactive':
-					await runClaudeCodeForTicket(prompt, repoPath, true);
-					break;
-				case 'cursor-autonomous':
-					await runCursorForTicket(prompt, repoPath);
-					break;
-				case 'gemini-autonomous':
-					await runGeminiForTicket(prompt, repoPath);
-					break;
-				case 'codex-full-auto':
-					await runCodexForTicket(prompt, repoPath, true);
-					break;
-				case 'codex-autonomous':
-					await runCodexForTicket(prompt, repoPath, false);
-					break;
-				case 'aider-autonomous':
-					await runAiderForTicket(prompt, repoPath);
-					break;
-				case 'opencode-autonomous':
-					await runOpenCodeForTicket(prompt, repoPath);
-					break;
-				case 'cline-autonomous':
-					await runClineForTicket(prompt, repoPath);
-					break;
-				case 'rovo-autonomous':
-					await runRovoForTicket(prompt, repoPath, getJiraBrowseUrl(detail));
-					break;
-			}
+			await dispatchAgent(agentOption, prompt, repoPath, jiraUrl);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await notifySlackStatus(
@@ -264,4 +275,109 @@ export async function launchAgentForRepos(
 	}
 
 	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
+}
+
+export function resolveAgentOptionById(id: string): WorkAgentOption | undefined {
+	const match = ALL_AGENT_OPTIONS.find((o) => o.id === id);
+	if (!match) return undefined;
+	const { cli: __, ...option } = match;
+	return option;
+}
+
+export async function launchMultipleTickets(
+	details: JiraIssueDetail[],
+	agentOption: WorkAgentOption,
+	onStatusChange: (statuses: TicketRunStatus[]) => void,
+): Promise<TicketRunStatus[]> {
+	const statuses: TicketRunStatus[] = details.map((d) => ({
+		ticketKey: d.key,
+		title: String(d.fields.summary ?? d.key),
+		status: 'queued',
+		agent: agentOption.label,
+		repos: [],
+	}));
+	onStatusChange(statuses);
+
+	const resolutions = await resolveRepoPathsForMultipleTickets(details);
+
+	for (const [i, detail] of details.entries()) {
+		const resolution = resolutions.get(detail.key);
+		if (resolution) {
+			statuses[i].repos = [...resolution.repoPaths.values()];
+		}
+	}
+	onStatusChange(statuses);
+
+	const tasks = details.map(async (detail, i) => {
+		const resolution = resolutions.get(detail.key);
+		if (!resolution) {
+			statuses[i].status = 'failed';
+			statuses[i].error = 'Could not resolve repositories.';
+			onStatusChange(statuses);
+			return;
+		}
+
+		statuses[i].status = 'running';
+		onStatusChange(statuses);
+
+		const paths = [...resolution.repoPaths.values()];
+		const worktreePaths: string[] = [];
+
+		try {
+			const firstRepoContributing = await readContributing(paths[0]);
+			const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
+			const clarifications = formatClarifications(preflight);
+			const figmaSection = await fetchFigmaDesignContext(detail);
+			const jiraUrl = getJiraBrowseUrl(detail);
+
+			await transitionIssueToInProgress(detail);
+
+			for (const repoPath of paths) {
+				const useWorktree = resolution.needsWorktree.has(repoPath);
+				let axonChild: ReturnType<typeof startAxonWatch> = null;
+
+				try {
+					const effectivePath = await prepareRepoForWork(repoPath, detail.key, useWorktree);
+					if (useWorktree) worktreePaths.push(effectivePath);
+
+					const contributing =
+						repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
+					const axonHint = getAxonPromptHint(effectivePath);
+					axonChild = startAxonWatch(effectivePath);
+
+					const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
+					await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+				} finally {
+					stopAxonWatch(axonChild);
+				}
+			}
+
+			statuses[i].status = 'done';
+			statuses[i].worktreePaths = worktreePaths;
+			await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
+		} catch (error) {
+			statuses[i].status = 'failed';
+			statuses[i].error = error instanceof Error ? error.message : String(error);
+			statuses[i].worktreePaths = worktreePaths;
+			await notifySlackStatus(
+				`ForgePilot error for ${detail.key} using ${agentOption.label}: ${statuses[i].error}`,
+			);
+		}
+
+		onStatusChange(statuses);
+	});
+
+	await Promise.allSettled(tasks);
+
+	return statuses;
+}
+
+export async function cleanupWorktrees(statuses: TicketRunStatus[]): Promise<void> {
+	for (const s of statuses) {
+		if (!s.worktreePaths?.length) continue;
+		for (const wtPath of s.worktreePaths) {
+			const originalRepo = s.repos[0];
+			if (originalRepo) await removeWorktree(originalRepo, wtPath);
+		}
+	}
 }

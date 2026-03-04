@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
 import { getDescriptionText } from './jira-text.js';
-import type { JiraIssueDetail, RepoLabel } from './types.js';
+import type { JiraIssueDetail, RepoLabel, TicketRepoResolution } from './types.js';
 import { renderRepoPicker } from './ui.js';
 
 const execFileAsync = promisify(execFile);
@@ -221,4 +221,42 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 	}
 
 	return repoMap;
+}
+
+export async function resolveRepoPathsForMultipleTickets(
+	details: JiraIssueDetail[],
+): Promise<Map<string, TicketRepoResolution>> {
+	const result = new Map<string, TicketRepoResolution>();
+	const repoUsageCount = new Map<string, number>();
+
+	const perTicketRepos = new Map<string, Map<string, string>>();
+	for (const detail of details) {
+		const repoPaths = await resolveRepoPathsFromUser(detail);
+		perTicketRepos.set(detail.key, repoPaths);
+		for (const repoPath of repoPaths.values()) {
+			repoUsageCount.set(repoPath, (repoUsageCount.get(repoPath) ?? 0) + 1);
+		}
+	}
+
+	const repoFirstClaim = new Set<string>();
+
+	for (const detail of details) {
+		const repoPaths = perTicketRepos.get(detail.key)!;
+		const needsWorktree = new Set<string>();
+
+		for (const repoPath of repoPaths.values()) {
+			const usedByMultiple = (repoUsageCount.get(repoPath) ?? 0) > 1;
+			if (usedByMultiple) {
+				if (repoFirstClaim.has(repoPath)) {
+					needsWorktree.add(repoPath);
+				} else {
+					repoFirstClaim.add(repoPath);
+				}
+			}
+		}
+
+		result.set(detail.key, { repoPaths, needsWorktree });
+	}
+
+	return result;
 }
