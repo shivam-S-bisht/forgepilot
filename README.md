@@ -2,6 +2,71 @@
 
 A dynamic CLI that automates coding agent interactions with your repositories based on Jira tickets. It fetches tickets, resolves local repos, injects rich context (Figma designs, Axon knowledge graphs, contributing guidelines, preflight checks), and launches AI agents to do the work.
 
+## How It Works
+
+The diagram below shows the end-to-end workflow for both the CLI and MCP Server.
+
+```mermaid
+flowchart TD
+    subgraph entryPoints [Entry Points]
+        CLI["forgepilot CLI"]
+        MCP["forgepilot-mcp Server"]
+    end
+
+    subgraph scopeSelection [Scope Selection]
+        Scope{"Ticket Scope"}
+        CurrentSprint["Current Sprint"]
+        AllAssigned["All Assigned"]
+    end
+
+    subgraph ticketFlow [Ticket Processing]
+        FetchTickets["Fetch Jira Tickets"]
+        TicketList["Interactive Ticket List / Auto-Select"]
+        LoadDetails["Load Ticket Details"]
+    end
+
+    subgraph contextGathering [Context Gathering]
+        ResolveRepos["Resolve Local Repositories"]
+        PrepareBranch["Prepare Branch (stash, fetch, checkout, create)"]
+        Preflight["Preflight Checks (AI Analysis)"]
+        FigmaCtx["Fetch Figma Designs"]
+        AxonCtx["Fetch Axon Knowledge Graph"]
+        Guidelines["Read Contributing Guidelines"]
+    end
+
+    subgraph agentExecution [Agent Execution]
+        BuildPrompt["Build Structured Prompt"]
+        PickAgent["Select AI Agent"]
+        LaunchAgent["Launch Agent in Repo"]
+    end
+
+    subgraph postAgent [Post-Agent Actions]
+        TransitionJira["Transition Ticket to In Progress"]
+        NotifySlack["Notify Slack"]
+        PushBranch["Push Branch"]
+        CreatePR["Create MR / PR"]
+    end
+
+    CLI --> Scope
+    MCP --> FetchTickets
+    Scope --> CurrentSprint --> FetchTickets
+    Scope --> AllAssigned --> FetchTickets
+    FetchTickets --> TicketList --> LoadDetails
+    LoadDetails --> ResolveRepos
+    ResolveRepos --> PrepareBranch
+    PrepareBranch --> Preflight
+    Preflight --> FigmaCtx
+    FigmaCtx --> AxonCtx
+    AxonCtx --> Guidelines
+    Guidelines --> BuildPrompt
+    BuildPrompt --> PickAgent
+    PickAgent --> LaunchAgent
+    LaunchAgent --> TransitionJira
+    TransitionJira --> NotifySlack
+    NotifySlack --> PushBranch
+    PushBranch --> CreatePR
+```
+
 ## Install
 
 ### Local development
