@@ -18,6 +18,7 @@ import {
 	renderDetails,
 	renderList,
 	renderMultiAgentPicker,
+	renderMultiTicketBrief,
 	renderMultiTicketDashboard,
 	renderMultiTicketSummary,
 	renderPostAgentPrompt,
@@ -34,6 +35,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let inDetailView = false;
 	let inAgentPicker = false;
 	let inMultiAgentPicker = false;
+	let inMultiBrief = false;
 	let showPostAgentPrompt = false;
 	let showMultiSummary = false;
 	let postAgentMessage = '';
@@ -111,6 +113,80 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				lastMultiStatuses = [];
 				checkedIndices.clear();
 				redrawList();
+				return;
+			}
+			return;
+		}
+
+		if (inMultiBrief) {
+			if (key.name === 'b' || key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
+				inMultiBrief = false;
+				redrawList();
+				return;
+			}
+			if (key.name === 'w' && !launchingAgent) {
+				inMultiBrief = false;
+				const selectedTickets = [...checkedIndices].map((i) => tickets[i]);
+
+				const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
+				if (defaultAgentId) {
+					const defaultOption = resolveAgentOptionById(defaultAgentId);
+					if (defaultOption && !INTERACTIVE_AGENT_IDS.has(defaultOption.id)) {
+						launchingAgent = true;
+						if (process.stdin.isTTY) process.stdin.setRawMode(false);
+
+						clearScreen();
+						console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+
+						const details = await Promise.all(
+							selectedTickets.map(async (t) => {
+								if (t.detail) return t.detail;
+								try {
+									t.detail = await fetchIssueDetail(t.key);
+									return t.detail;
+								} catch {
+									return null;
+								}
+							}),
+						);
+
+						const validDetails = details.filter((d) => d !== null);
+						if (!validDetails.length) {
+							clearScreen();
+							console.log(chalk.red('Could not load details for any selected ticket.'));
+							if (process.stdin.isTTY) process.stdin.setRawMode(true);
+							launchingAgent = false;
+							redrawList();
+							return;
+						}
+
+						lastMultiStatuses = await launchMultipleTickets(
+							validDetails,
+							defaultOption,
+							(statuses) => renderMultiTicketDashboard(statuses),
+						);
+
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
+						launchingAgent = false;
+						showMultiSummary = true;
+						renderMultiTicketSummary(lastMultiStatuses);
+						return;
+					}
+				}
+
+				clearScreen();
+				console.log(chalk.gray('Detecting available AI agents...'));
+				const allOptions = await getAvailableAgentOptions();
+				agentOptions = filterAutonomousAgents(allOptions);
+				if (!agentOptions.length) {
+					clearScreen();
+					console.log(chalk.yellow('No autonomous AI agent CLIs found in PATH.'));
+					console.log(chalk.gray('\nPress any key to go back...'));
+					return;
+				}
+				inMultiAgentPicker = true;
+				selectedAgentIndex = 0;
+				renderMultiAgentPicker(selectedTickets, agentOptions, selectedAgentIndex);
 				return;
 			}
 			return;
@@ -533,10 +609,72 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		}
 
 		if (key.name === 'return' || key.name === 'enter') {
+			if (checkedIndices.size > 1) {
+				const selectedTickets = [...checkedIndices].map((i) => tickets[i]);
+				const skipDetail = (process.env.FORGEPILOT_SKIP_DETAIL ?? '').trim().toLowerCase() === 'true';
+
+				if (skipDetail) {
+					const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
+					if (defaultAgentId) {
+						const defaultOption = resolveAgentOptionById(defaultAgentId);
+						if (defaultOption && !INTERACTIVE_AGENT_IDS.has(defaultOption.id)) {
+							launchingAgent = true;
+							if (process.stdin.isTTY) process.stdin.setRawMode(false);
+
+							clearScreen();
+							console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+
+							const details = await Promise.all(
+								selectedTickets.map(async (t) => {
+									if (t.detail) return t.detail;
+									try {
+										t.detail = await fetchIssueDetail(t.key);
+										return t.detail;
+									} catch {
+										return null;
+									}
+								}),
+							);
+
+							const validDetails = details.filter((d) => d !== null);
+							if (!validDetails.length) {
+								clearScreen();
+								console.log(chalk.red('Could not load details for any selected ticket.'));
+								if (process.stdin.isTTY) process.stdin.setRawMode(true);
+								launchingAgent = false;
+								redrawList();
+								return;
+							}
+
+							lastMultiStatuses = await launchMultipleTickets(
+								validDetails,
+								defaultOption,
+								(statuses) => renderMultiTicketDashboard(statuses),
+							);
+
+							if (process.stdin.isTTY) process.stdin.setRawMode(true);
+							launchingAgent = false;
+							showMultiSummary = true;
+							renderMultiTicketSummary(lastMultiStatuses);
+							return;
+						}
+					}
+				}
+
+				inMultiBrief = true;
+				renderMultiTicketBrief(selectedTickets);
+				return;
+			}
+
 			const selected = tickets[selectedIndex];
 			loadingDetail = true;
-			clearScreen();
-			console.log(`Loading ${selected.key} details via acli...`);
+			const willSkipDetail =
+				(process.env.FORGEPILOT_SKIP_DETAIL ?? '').trim().toLowerCase() === 'true' &&
+				!!process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
+			if (!willSkipDetail) {
+				clearScreen();
+				console.log(`Loading ${selected.key} details via acli...`);
+			}
 			try {
 				selected.detail = await fetchIssueDetail(selected.key);
 			} catch (error) {
@@ -553,6 +691,44 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			} finally {
 				loadingDetail = false;
 			}
+
+			const skipDetail = (process.env.FORGEPILOT_SKIP_DETAIL ?? '').trim().toLowerCase() === 'true';
+			const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
+
+			if (skipDetail && defaultAgentId && selected.detail) {
+				const defaultOption = resolveAgentOptionById(defaultAgentId);
+				if (defaultOption) {
+					launchingAgent = true;
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+
+					lastAgentOption = defaultOption;
+					clearScreen();
+					console.log(chalk.bold(`Starting ${defaultOption.label} for ${selected.key}...`));
+					let launchFailed = false;
+					let launchErrorMessage = '';
+
+					try {
+						const repoPaths = await resolveRepoPathsFromUser(selected.detail);
+						lastResolvedPaths = repoPaths;
+						await launchAgentForRepos(selected.detail, defaultOption, repoPaths);
+					} catch (error) {
+						launchFailed = true;
+						launchErrorMessage = error instanceof Error ? error.message : String(error);
+					} finally {
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
+						launchingAgent = false;
+					}
+
+					inDetailView = true;
+					showPostAgentPrompt = true;
+					postAgentMessage = launchFailed
+						? chalk.red(`Failed to start ${defaultOption.label}: ${launchErrorMessage}`)
+						: chalk.green(`${defaultOption.label} finished. Review output and choose next step.`);
+					renderPostAgentPrompt(selected, postAgentMessage);
+					return;
+				}
+			}
+
 			inDetailView = true;
 			renderDetails(selected, boards);
 		}

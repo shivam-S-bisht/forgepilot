@@ -277,6 +277,22 @@ export function renderMultiTicketSummary(statuses: TicketRunStatus[]) {
 	console.log(chalk.gray('='.repeat(90)));
 }
 
+export function renderMultiTicketBrief(selectedTickets: TicketView[]) {
+	clearScreen();
+	console.log(chalk.bold(`Selected Tickets (${selectedTickets.length})`));
+	console.log(chalk.gray('='.repeat(90)));
+	console.log();
+	for (const t of selectedTickets) {
+		const statusStr = t.status ? `  [${colorStatus(t.status)}]` : '';
+		console.log(`  ${chalk.white.bold(t.key)}  ${chalk.gray(t.title)}${statusStr}`);
+	}
+	console.log();
+	console.log(chalk.gray('='.repeat(90)));
+	console.log(chalk.white('  w  Start work on all selected tickets'));
+	console.log(chalk.white('  b  Back to ticket listing'));
+	console.log(chalk.gray('='.repeat(90)));
+}
+
 export function renderMultiAgentPicker(
 	selectedTickets: TicketView[],
 	options: WorkAgentOption[],

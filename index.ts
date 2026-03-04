@@ -80,9 +80,34 @@ function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 	});
 }
 
+function printActiveConfig() {
+	const vars: [string, string | undefined][] = [
+		['FORGEPILOT_TICKET_SCOPE', process.env.FORGEPILOT_TICKET_SCOPE],
+		['FORGEPILOT_DEFAULT_AGENT', process.env.FORGEPILOT_DEFAULT_AGENT],
+		['FORGEPILOT_AUTO_ALL_TICKETS', process.env.FORGEPILOT_AUTO_ALL_TICKETS],
+		['FORGEPILOT_SKIP_DETAIL', process.env.FORGEPILOT_SKIP_DETAIL],
+		['FORGEPILOT_BASE_BRANCH', process.env.FORGEPILOT_BASE_BRANCH],
+		['FORGEPILOT_AXON_VENV_PATH', process.env.FORGEPILOT_AXON_VENV_PATH],
+		['FORGEPILOT_FIGMA_PAT', process.env.FORGEPILOT_FIGMA_PAT ? '***' : undefined],
+		['FORGEPILOT_JIRA_FIGMA_FIELD', process.env.FORGEPILOT_JIRA_FIGMA_FIELD],
+		['FORGEPILOT_JIRA_AC_FIELD', process.env.FORGEPILOT_JIRA_AC_FIELD],
+		['FORGEPILOT_WORKTREE_DIR', process.env.FORGEPILOT_WORKTREE_DIR],
+	];
+
+	const active = vars.filter(([, v]) => v?.trim());
+	if (!active.length) return;
+
+	console.log(chalk.gray('\nActive configuration:'));
+	for (const [name, value] of active) {
+		console.log(chalk.gray(`  ${name}=${value}`));
+	}
+	console.log();
+}
+
 async function main() {
 	try {
 		activateAxonVenv();
+		printActiveConfig();
 
 		const auto = isAutoMode();
 		const defaultAgentId = getDefaultAgentId();

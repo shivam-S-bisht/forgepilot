@@ -210,14 +210,66 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 			console.log(chalk.green(`  ✓ ${repo.label} → ${localPath}`));
 		} else {
 			missing.push(repo.label);
-			console.log(chalk.red(`  ✗ ${repo.label} (${repo.normalizedUrl}) — not found locally`));
+			console.log(chalk.yellow(`  ✗ ${repo.label} (${repo.normalizedUrl}) — not found locally`));
 		}
 	}
 
+	if (missing.length && repoMap.size > 0) {
+		console.log(chalk.yellow(`\n  ${missing.length} repo(s) not found locally. Continuing with matched repos.`));
+		console.log(chalk.gray('  You can also select additional local repos below.\n'));
+	}
+
+	if (missing.length && repoMap.size === 0) {
+		console.log(chalk.yellow('\n  None of the ticket repos were found locally.'));
+		console.log(chalk.gray('  Please select the correct local repo(s) below.\n'));
+	}
+
 	if (missing.length) {
-		throw new Error(
-			`Could not find local repos for: ${missing.join(', ')}. Make sure they are cloned under ${rootDir}.`,
-		);
+		const cacheKey = `repoChoice_${detail.key}`;
+		const cached = await getCached<string[]>(cacheKey);
+		if (cached?.length) {
+			const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
+			if (allValid) {
+				console.log(chalk.gray(`Using cached repo selection for missing repos:`));
+				for (const p of cached) {
+					const name = path.basename(p);
+					if (![...repoMap.values()].includes(p)) {
+						repoMap.set(name, p);
+						console.log(chalk.green(`  ✓ ${name} → ${p}`));
+					}
+				}
+				return repoMap;
+			}
+		}
+
+		if (localRepoPaths.length) {
+			const alreadyMatched = new Set(repoMap.values());
+			const unmatched = localRepoPaths.filter((p) => !alreadyMatched.has(p));
+			if (unmatched.length) {
+				const picked = await pickReposInteractive(unmatched, detail.key);
+				if (picked.length) {
+					await setCached(cacheKey, picked);
+					for (const p of picked) {
+						const name = path.basename(p);
+						repoMap.set(name, p);
+						console.log(chalk.green(`  ✓ ${name} → ${p}`));
+					}
+				}
+			}
+		} else {
+			const manualPath = await askLine('No local repos found. Enter the repo path manually: ');
+			if (manualPath) {
+				const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
+				if (existsSync(path.join(resolved, '.git'))) {
+					repoMap.set('manual', resolved);
+					await setCached(`repoChoice_${detail.key}`, [resolved]);
+				}
+			}
+		}
+	}
+
+	if (!repoMap.size) {
+		throw new Error('No repositories resolved. Cannot proceed.');
 	}
 
 	return repoMap;
