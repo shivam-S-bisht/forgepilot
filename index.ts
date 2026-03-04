@@ -2,6 +2,7 @@
 
 import readline from 'node:readline';
 import chalk from 'chalk';
+import { activateAxonVenv } from './src/axon.js';
 import { getCached, setCached } from './src/cache.js';
 import { startInteractiveCli } from './src/cli.js';
 import { fetchBoards, fetchTicketsByScope } from './src/jira.js';
@@ -64,6 +65,8 @@ function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 
 async function main() {
 	try {
+		activateAxonVenv();
+
 		const cachedScope = await getCached<TicketScope>('ticketScope');
 		const scope = await pickScope(cachedScope);
 		await setCached('ticketScope', scope);
