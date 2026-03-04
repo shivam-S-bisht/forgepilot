@@ -39,6 +39,41 @@ export function renderScopePicker(options: ScopeOption[], selectedIndex: number)
 	console.log(chalk.gray('='.repeat(60)));
 }
 
+export function renderRepoPicker(
+	repos: string[],
+	cursorIndex: number,
+	selectedIndices: Set<number>,
+	ticketKey: string,
+) {
+	clearScreen();
+	console.log(chalk.bold(`Select repo(s) for ${ticketKey}`));
+	console.log(chalk.gray('No repository URLs found in ticket description.'));
+	console.log(chalk.gray('Use ↑/↓ to navigate, Space to toggle, Enter to confirm.'));
+	console.log(chalk.gray('='.repeat(70)));
+	console.log();
+
+	const pageSize = 15;
+	const pageStart = Math.floor(cursorIndex / pageSize) * pageSize;
+	const pageEnd = Math.min(pageStart + pageSize, repos.length);
+
+	for (let i = pageStart; i < pageEnd; i++) {
+		const isCursor = i === cursorIndex;
+		const isChecked = selectedIndices.has(i);
+		const pointer = isCursor ? chalk.bold.cyan('▶') : ' ';
+		const checkbox = isChecked ? chalk.green('◉') : chalk.gray('○');
+		const label = isCursor ? chalk.bold.white(repos[i]) : chalk.white(repos[i]);
+		console.log(`${pointer} ${checkbox} ${label}`);
+	}
+
+	console.log();
+	if (repos.length > pageSize) {
+		console.log(chalk.gray(`Showing ${pageStart + 1}-${pageEnd} of ${repos.length}`));
+	}
+	const count = selectedIndices.size;
+	console.log(chalk.gray(`${count} repo(s) selected`));
+	console.log(chalk.gray('='.repeat(70)));
+}
+
 export function clearScreen() {
 	process.stdout.write('\x1Bc');
 }

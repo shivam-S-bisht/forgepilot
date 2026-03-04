@@ -8,6 +8,7 @@ import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
 import { getDescriptionText } from './jira-text.js';
 import type { JiraIssueDetail, RepoLabel } from './types.js';
+import { renderRepoPicker } from './ui.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,6 +83,54 @@ function askLine(prompt: string): Promise<string> {
 	);
 }
 
+function pickReposInteractive(repos: string[], ticketKey: string): Promise<string[]> {
+	return new Promise((resolve) => {
+		let cursorIndex = 0;
+		const selectedIndices = new Set<number>();
+
+		readline.emitKeypressEvents(process.stdin);
+		if (process.stdin.isTTY) process.stdin.setRawMode(true);
+
+		renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+
+		const onKeypress = (_: unknown, key: readline.Key) => {
+			if (key.ctrl && key.name === 'c') {
+				if (process.stdin.isTTY) process.stdin.setRawMode(false);
+				process.stdin.removeListener('keypress', onKeypress);
+				process.exit(0);
+			}
+
+			if (key.name === 'up') {
+				cursorIndex = cursorIndex === 0 ? repos.length - 1 : cursorIndex - 1;
+				renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+				return;
+			}
+
+			if (key.name === 'down') {
+				cursorIndex = cursorIndex === repos.length - 1 ? 0 : cursorIndex + 1;
+				renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+				return;
+			}
+
+			if (key.name === 'space') {
+				if (selectedIndices.has(cursorIndex)) selectedIndices.delete(cursorIndex);
+				else selectedIndices.add(cursorIndex);
+				renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+				return;
+			}
+
+			if (key.name === 'return' || key.name === 'enter') {
+				if (process.stdin.isTTY) process.stdin.setRawMode(false);
+				process.stdin.removeListener('keypress', onKeypress);
+				const picked = [...selectedIndices].sort().map((i) => repos[i]);
+				resolve(picked);
+			}
+		};
+
+		process.stdin.on('keypress', onKeypress);
+	});
+}
+
 export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise<Map<string, string>> {
 	const description = getDescriptionText(detail);
 	const ticketRepos = extractRepoLabels(description);
@@ -98,13 +147,45 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		console.log(chalk.gray(`Using cached root directory: ${rootDir}`));
 	}
 
+	console.log(chalk.gray(`\nScanning repos under ${rootDir} ...`));
+	const localRepoPaths = await scanLocalRepos(rootDir);
+	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
+
 	if (!ticketRepos.length) {
-		console.log(chalk.yellow('\nNo repository URLs found in ticket description.'));
-		const manualPath = await askLine('Enter the local repo path to work in: ');
-		if (!manualPath) throw new Error('No repo path provided.');
-		const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
-		if (!existsSync(path.join(resolved, '.git'))) throw new Error(`Not a git repository: ${resolved}`);
-		repoMap.set('manual', resolved);
+		const cacheKey = `repoChoice_${detail.key}`;
+		const cached = await getCached<string[]>(cacheKey);
+		if (cached?.length) {
+			const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
+			if (allValid) {
+				console.log(chalk.gray(`Using cached repo selection for ${detail.key}:`));
+				for (const p of cached) {
+					const name = path.basename(p);
+					repoMap.set(name, p);
+					console.log(chalk.green(`  ✓ ${name} → ${p}`));
+				}
+				return repoMap;
+			}
+		}
+
+		if (!localRepoPaths.length) {
+			const manualPath = await askLine('No repos found. Enter the local repo path to work in: ');
+			if (!manualPath) throw new Error('No repo path provided.');
+			const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
+			if (!existsSync(path.join(resolved, '.git'))) throw new Error(`Not a git repository: ${resolved}`);
+			repoMap.set('manual', resolved);
+			await setCached(cacheKey, [resolved]);
+			return repoMap;
+		}
+
+		const picked = await pickReposInteractive(localRepoPaths, detail.key);
+		if (!picked.length) throw new Error('No repos selected.');
+
+		await setCached(cacheKey, picked);
+		for (const p of picked) {
+			const name = path.basename(p);
+			repoMap.set(name, p);
+			console.log(chalk.green(`  ✓ ${name} → ${p}`));
+		}
 		return repoMap;
 	}
 
@@ -112,10 +193,6 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 	for (const repo of ticketRepos) {
 		console.log(chalk.cyan(`  ${repo.label} (${repo.normalizedUrl})`));
 	}
-
-	console.log(chalk.gray(`\nScanning repos under ${rootDir} ...`));
-	const localRepoPaths = await scanLocalRepos(rootDir);
-	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
 
 	const remoteIndex = new Map<string, string>();
 	for (const localPath of localRepoPaths) {

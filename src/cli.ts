@@ -1,6 +1,6 @@
 import readline from 'node:readline';
 import chalk from 'chalk';
-import { getWorkAgentOptions, launchAgentForRepos } from './agents.js';
+import { getAvailableAgentOptions, launchAgentForRepos } from './agents.js';
 import { fetchIssueDetail, fetchTicketsByJql, LOAD_MORE_TICKETS_JQL } from './jira.js';
 import { resolveRepoPathsFromUser } from './repo.js';
 import type { TicketView, WorkAgentOption } from './types.js';
@@ -15,6 +15,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let lastAgentOption: WorkAgentOption | null = null;
 	let lastResolvedPaths: Map<string, string> | null = null;
 	let selectedAgentIndex = 0;
+	let agentOptions: WorkAgentOption[] = [];
 	let loadingDetail = false;
 	let loadingMore = false;
 	let launchingAgent = false;
@@ -104,17 +105,15 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					return;
 				}
 
-				const options = getWorkAgentOptions();
-
 				if (key.name === 'up') {
-					selectedAgentIndex = selectedAgentIndex === 0 ? options.length - 1 : selectedAgentIndex - 1;
-					renderAgentPicker(tickets[selectedIndex], options, selectedAgentIndex);
+					selectedAgentIndex = selectedAgentIndex === 0 ? agentOptions.length - 1 : selectedAgentIndex - 1;
+					renderAgentPicker(tickets[selectedIndex], agentOptions, selectedAgentIndex);
 					return;
 				}
 
 				if (key.name === 'down') {
-					selectedAgentIndex = selectedAgentIndex === options.length - 1 ? 0 : selectedAgentIndex + 1;
-					renderAgentPicker(tickets[selectedIndex], options, selectedAgentIndex);
+					selectedAgentIndex = selectedAgentIndex === agentOptions.length - 1 ? 0 : selectedAgentIndex + 1;
+					renderAgentPicker(tickets[selectedIndex], agentOptions, selectedAgentIndex);
 					return;
 				}
 
@@ -131,7 +130,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					inAgentPicker = false;
 					if (process.stdin.isTTY) process.stdin.setRawMode(false);
 
-					const selectedOption = options[selectedAgentIndex];
+					const selectedOption = agentOptions[selectedAgentIndex];
 					lastAgentOption = selectedOption;
 					clearScreen();
 					console.log(chalk.bold(`Starting ${selectedOption.label} for ${selectedTicket.key}...`));
@@ -170,9 +169,19 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			if (key.name === 'w') {
 				const selected = tickets[selectedIndex];
 				if (!selected.detail || launchingAgent) return;
+				clearScreen();
+				console.log(chalk.gray('Detecting available AI agents...'));
+				agentOptions = await getAvailableAgentOptions();
+				if (!agentOptions.length) {
+					clearScreen();
+					console.log(chalk.yellow('No AI agent CLIs found in PATH.'));
+					console.log(chalk.gray('Install one of: copilot, cursor, acli (for Rovo)'));
+					console.log(chalk.gray('\nPress any key to go back...'));
+					return;
+				}
 				inAgentPicker = true;
 				selectedAgentIndex = 0;
-				renderAgentPicker(selected, getWorkAgentOptions(), selectedAgentIndex);
+				renderAgentPicker(selected, agentOptions, selectedAgentIndex);
 			}
 			return;
 		}
