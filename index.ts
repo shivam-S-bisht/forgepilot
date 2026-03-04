@@ -32,6 +32,14 @@ function getDefaultAgentId(): string | undefined {
 	return process.env.FORGEPILOT_DEFAULT_AGENT?.trim() || undefined;
 }
 
+function getEnvScope(): TicketScope | undefined {
+	const raw = process.env.FORGEPILOT_TICKET_SCOPE?.trim().toLowerCase();
+	if (!raw) return undefined;
+	if (raw === 'current' || raw === 'current-sprint') return 'current-sprint';
+	if (raw === 'all' || raw === 'all-assigned') return 'all-assigned';
+	return undefined;
+}
+
 function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 	return new Promise((resolve) => {
 		const defaultIndex = cachedScope ? SCOPE_OPTIONS.findIndex((o) => o.id === cachedScope) : 0;
@@ -79,10 +87,14 @@ async function main() {
 		const auto = isAutoMode();
 		const defaultAgentId = getDefaultAgentId();
 
+		const envScope = getEnvScope();
 		const cachedScope = await getCached<TicketScope>('ticketScope');
 		let scope: TicketScope;
 
-		if (auto && cachedScope) {
+		if (envScope) {
+			scope = envScope;
+			console.log(chalk.gray(`Using FORGEPILOT_TICKET_SCOPE="${scope}"`));
+		} else if (auto && cachedScope) {
 			scope = cachedScope;
 			console.log(chalk.gray(`Auto mode: using cached scope "${scope}"`));
 		} else if (auto) {

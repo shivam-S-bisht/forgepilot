@@ -5,6 +5,7 @@ import {
 	getAvailableAgentOptions,
 	launchAgentForRepos,
 	launchMultipleTickets,
+	resolveAgentOptionById,
 } from './agents.js';
 import { pushBranchAndCreateMR } from './git.js';
 import { fetchIssueDetail, fetchTicketsByJql, LOAD_MORE_TICKETS_JQL } from './jira.js';
@@ -275,6 +276,41 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			if (key.name === 'w') {
 				const selected = tickets[selectedIndex];
 				if (!selected.detail || launchingAgent) return;
+
+				const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
+				if (defaultAgentId) {
+					const defaultOption = resolveAgentOptionById(defaultAgentId);
+					if (defaultOption) {
+						launchingAgent = true;
+						if (process.stdin.isTTY) process.stdin.setRawMode(false);
+
+						lastAgentOption = defaultOption;
+						clearScreen();
+						console.log(chalk.bold(`Starting ${defaultOption.label} for ${selected.key}...`));
+						let launchFailed = false;
+						let launchErrorMessage = '';
+
+						try {
+							const repoPaths = await resolveRepoPathsFromUser(selected.detail);
+							lastResolvedPaths = repoPaths;
+							await launchAgentForRepos(selected.detail, defaultOption, repoPaths);
+						} catch (error) {
+							launchFailed = true;
+							launchErrorMessage = error instanceof Error ? error.message : String(error);
+						} finally {
+							if (process.stdin.isTTY) process.stdin.setRawMode(true);
+							launchingAgent = false;
+						}
+
+						showPostAgentPrompt = true;
+						postAgentMessage = launchFailed
+							? chalk.red(`Failed to start ${defaultOption.label}: ${launchErrorMessage}`)
+							: chalk.green(`${defaultOption.label} finished. Review output and choose next step.`);
+						renderPostAgentPrompt(selected, postAgentMessage);
+						return;
+					}
+				}
+
 				clearScreen();
 				console.log(chalk.gray('Detecting available AI agents...'));
 				agentOptions = await getAvailableAgentOptions();
@@ -384,6 +420,53 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		}
 
 		if (key.name === 'w' && checkedIndices.size > 1 && !launchingAgent) {
+			const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
+			if (defaultAgentId) {
+				const defaultOption = resolveAgentOptionById(defaultAgentId);
+				if (defaultOption && !INTERACTIVE_AGENT_IDS.has(defaultOption.id)) {
+					const selectedTickets = [...checkedIndices].map((i) => tickets[i]);
+					launchingAgent = true;
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+
+					clearScreen();
+					console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+
+					const details = await Promise.all(
+						selectedTickets.map(async (t) => {
+							if (t.detail) return t.detail;
+							try {
+								t.detail = await fetchIssueDetail(t.key);
+								return t.detail;
+							} catch {
+								return null;
+							}
+						}),
+					);
+
+					const validDetails = details.filter((d) => d !== null);
+					if (!validDetails.length) {
+						clearScreen();
+						console.log(chalk.red('Could not load details for any selected ticket.'));
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
+						launchingAgent = false;
+						redrawList();
+						return;
+					}
+
+					lastMultiStatuses = await launchMultipleTickets(
+						validDetails,
+						defaultOption,
+						(statuses) => renderMultiTicketDashboard(statuses),
+					);
+
+					if (process.stdin.isTTY) process.stdin.setRawMode(true);
+					launchingAgent = false;
+					showMultiSummary = true;
+					renderMultiTicketSummary(lastMultiStatuses);
+					return;
+				}
+			}
+
 			clearScreen();
 			console.log(chalk.gray('Detecting available AI agents...'));
 			const allOptions = await getAvailableAgentOptions();
