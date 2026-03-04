@@ -64,6 +64,16 @@ export async function createWorktree(repoPath: string, ticketKey: string): Promi
 
 	if (existsSync(wtPath)) {
 		console.log(chalk.gray(`  Worktree ${wtPath} already exists, reusing...`));
+		const axonSource = path.join(repoPath, '.axon');
+		const axonTarget = path.join(wtPath, '.axon');
+		if (existsSync(axonSource) && !existsSync(axonTarget)) {
+			try {
+				await fs.symlink(axonSource, axonTarget);
+				console.log(chalk.gray('  Symlinked .axon/ into worktree.'));
+			} catch {
+				// Symlink may already exist or fail silently.
+			}
+		}
 		return wtPath;
 	}
 
@@ -74,6 +84,17 @@ export async function createWorktree(repoPath: string, ticketKey: string): Promi
 	} else {
 		console.log(chalk.gray(`  Creating worktree with new branch ${branchName} from ${baseBranch}...`));
 		await gitExec(repoPath, ['worktree', 'add', '-b', branchName, wtPath, baseBranch]);
+	}
+
+	const axonSource = path.join(repoPath, '.axon');
+	const axonTarget = path.join(wtPath, '.axon');
+	if (existsSync(axonSource) && !existsSync(axonTarget)) {
+		try {
+			await fs.symlink(axonSource, axonTarget);
+			console.log(chalk.gray('  Symlinked .axon/ into worktree.'));
+		} catch {
+			console.log(chalk.yellow('  Warning: could not symlink .axon/ into worktree.'));
+		}
 	}
 
 	console.log(chalk.green(`  Worktree ready at ${wtPath}`));

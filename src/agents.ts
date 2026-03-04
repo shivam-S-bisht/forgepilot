@@ -249,20 +249,20 @@ export async function launchAgentForRepos(
 		let axonChild: ReturnType<typeof startAxonWatch> = null;
 		try {
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
-			await prepareRepoForWork(repoPath, detail.key);
+			const effectivePath = await prepareRepoForWork(repoPath, detail.key);
 
-			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(repoPath);
+			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
 			if (contributing) {
-				console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${repoPath}`));
+				console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${effectivePath}`));
 			}
 
-			const axonHint = getAxonPromptHint(repoPath);
-			logAxonStatus(repoPath);
-			axonChild = startAxonWatch(repoPath);
+			const axonHint = getAxonPromptHint(effectivePath);
+			logAxonStatus(effectivePath);
+			axonChild = startAxonWatch(effectivePath);
 
 			const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
-			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${repoPath} ...`));
-			await dispatchAgent(agentOption, prompt, repoPath, jiraUrl);
+			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ...`));
+			await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await notifySlackStatus(
@@ -280,8 +280,8 @@ export async function launchAgentForRepos(
 export function resolveAgentOptionById(id: string): WorkAgentOption | undefined {
 	const match = ALL_AGENT_OPTIONS.find((o) => o.id === id);
 	if (!match) return undefined;
-	const { cli: __, ...option } = match;
-	return option;
+	const { id: agentId, label, description } = match;
+	return { id: agentId, label, description };
 }
 
 export async function launchMultipleTickets(
