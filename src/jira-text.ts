@@ -240,7 +240,7 @@ export function buildWorkPrompt(
 		'   a. Complete the task.',
 		`   b. Mark it done in ${todoFile} by changing "- [ ]" to "- [x]".`,
 		`   c. Commit the code changes (do NOT include ${todoFile} in the commit).`,
-		`      Use commit message format: [${detail.key}] <concise description of what was done>`,
+		`      Use commit message format: ${detail.key} <concise description of what was done>`,
 		'   d. Move to the next item.',
 		'',
 		'5. VERIFY — After all items are done, run linters, type checks, and tests if the repo has them.',
@@ -274,7 +274,7 @@ export function buildWorkPrompt(
 
 	sections.push(
 		'=== CONSTRAINTS ===',
-		`- Commit after completing each todo item. Use the format: [${detail.key}] <concise description>. Do NOT include ${todoFile} in any commit. Do NOT push to remote.`,
+		`- Commit after completing each todo item. Use the format: ${detail.key} <concise description>. Do NOT include ${todoFile} in any commit. Do NOT push to remote.`,
 		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
 		'- Prefer editing existing files over creating new ones.',
