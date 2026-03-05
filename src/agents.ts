@@ -1,4 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from './axon.js';
@@ -12,6 +14,20 @@ import { notifySlackStatus } from './slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
 
 const execFileAsync = promisify(execFile);
+
+async function cleanupTodoFiles(repoPath: string): Promise<void> {
+	try {
+		const entries = await fs.readdir(repoPath);
+		for (const entry of entries) {
+			if (entry.startsWith('.forgepilot-todos-') && entry.endsWith('.md')) {
+				await fs.unlink(path.join(repoPath, entry));
+				console.log(chalk.gray(`  Cleaned up ${entry}`));
+			}
+		}
+	} catch {
+		// Non-critical — ignore cleanup failures.
+	}
+}
 
 async function runCommandInteractive(command: string, args: string[], toolName: string, cwd?: string): Promise<void> {
 	await new Promise<void>((resolve, reject) => {
@@ -263,6 +279,7 @@ export async function launchAgentForRepos(
 			const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
 			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ...`));
 			await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+			await cleanupTodoFiles(effectivePath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await notifySlackStatus(
@@ -347,6 +364,7 @@ export async function launchMultipleTickets(
 
 					const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
 					await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+					await cleanupTodoFiles(effectivePath);
 				} finally {
 					stopAxonWatch(axonChild);
 				}

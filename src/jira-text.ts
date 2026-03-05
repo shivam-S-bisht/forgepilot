@@ -213,6 +213,8 @@ export function buildWorkPrompt(
 		'',
 	);
 
+	const todoFile = `.forgepilot-todos-${detail.key}.md`;
+
 	sections.push(
 		'=== WORKFLOW ===',
 		'Follow these steps in order:',
@@ -223,16 +225,30 @@ export function buildWorkPrompt(
 		'2. EXPLORE — Examine the existing codebase: file structure, naming conventions,',
 		'   patterns, imports, and how similar features are implemented.',
 		'',
-		'3. PLAN — Decide which files to create or modify. Outline your approach.',
-		'   If the task is complex, break it into smaller steps.',
+		`3. PLAN — Create a file called ${todoFile} in the repo root with a markdown checklist`,
+		`   of tasks derived from the ticket. Format:`,
 		'',
-		'4. IMPLEMENT — Write the code. Follow existing patterns and contribution guidelines.',
-		'   Prefer editing existing files over creating new ones.',
+		`   # ${detail.key}: ${title}`,
 		'',
-		'5. VERIFY — Run linters, type checks, and tests if the repo has them.',
+		'   - [ ] First task description',
+		'   - [ ] Second task description',
+		'   - [ ] ...',
+		'',
+		'   Break the work into small, logical units. Each item should be independently committable.',
+		'',
+		`4. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
+		'   a. Complete the task.',
+		`   b. Mark it done in ${todoFile} by changing "- [ ]" to "- [x]".`,
+		`   c. Commit the code changes (do NOT include ${todoFile} in the commit).`,
+		`      Use commit message format: [${detail.key}] <concise description of what was done>`,
+		'   d. Move to the next item.',
+		'',
+		'5. VERIFY — After all items are done, run linters, type checks, and tests if the repo has them.',
 		'   Fix any errors you introduced. Ensure the build passes.',
 		'',
-		'6. REVIEW — Self-review your changes against the acceptance criteria.',
+		`6. CLEANUP — Delete the ${todoFile} file. Do NOT commit it.`,
+		'',
+		'7. REVIEW — Self-review your changes against the acceptance criteria.',
 		'   Confirm every AC item is addressed. If something is unclear, add a TODO comment.',
 		'',
 	);
@@ -258,7 +274,7 @@ export function buildWorkPrompt(
 
 	sections.push(
 		'=== CONSTRAINTS ===',
-		'- Commit changes gradually as you complete logical units of work. Use the format: [BRANCH_NAME] <concise description>. For example: [CE-1234] Add input validation for email field. Do NOT push to remote.',
+		`- Commit after completing each todo item. Use the format: [${detail.key}] <concise description>. Do NOT include ${todoFile} in any commit. Do NOT push to remote.`,
 		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
 		'- Prefer editing existing files over creating new ones.',
