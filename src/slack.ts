@@ -34,7 +34,7 @@ function canPostToSlackChannel(): boolean {
 }
 
 async function slackApi<T>(endpoint: string, options: RequestInit): Promise<T> {
-	const token = getRequiredEnv('SLACK_BOT_TOKEN');
+	const token = getRequiredEnv('FORGEPILOT_SLACK_BOT_TOKEN');
 	const response = await fetch(`https://slack.com/api/${endpoint}`, {
 		...options,
 		headers: {
@@ -59,7 +59,7 @@ async function postMessage(channel: string, text: string): Promise<string> {
 }
 
 async function fetchThreadReplies(channel: string, threadTs: string): Promise<SlackRepliesResponse> {
-	const token = getRequiredEnv('SLACK_BOT_TOKEN');
+	const token = getRequiredEnv('FORGEPILOT_SLACK_BOT_TOKEN');
 	const url = new URL('https://slack.com/api/conversations.replies');
 	url.searchParams.set('channel', channel);
 	url.searchParams.set('ts', threadTs);
@@ -107,7 +107,7 @@ export async function notifySlackStatus(text: string): Promise<void> {
 
 	try {
 		if (canPostToSlackChannel()) {
-			const channel = getRequiredEnv('SLACK_CHANNEL_ID');
+			const channel = getRequiredEnv('FORGEPILOT_SLACK_CHANNEL_ID');
 			await postMessage(channel, text);
 		}
 	} catch {
@@ -125,7 +125,7 @@ export async function askConcernViaSlack(
 ): Promise<string | null> {
 	if (!isSlackQaEnabled()) return null;
 
-	const channel = getRequiredEnv('SLACK_CHANNEL_ID');
+	const channel = getRequiredEnv('FORGEPILOT_SLACK_CHANNEL_ID');
 	const expectedUserId = process.env.FORGEPILOT_SLACK_EXPECTED_USER_ID?.trim();
 	const pollIntervalMs = Number(process.env.FORGEPILOT_SLACK_POLL_INTERVAL_MS ?? '5000');
 	const timeoutMs = Number(process.env.FORGEPILOT_SLACK_ANSWER_TIMEOUT_MS ?? `${10 * 60 * 1000}`);

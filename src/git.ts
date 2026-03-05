@@ -152,10 +152,42 @@ export async function prepareRepoForWork(
 	const alreadyExists = await branchExists(repoPath, branchName);
 	if (alreadyExists) {
 		console.log(chalk.gray(`  Branch ${branchName} already exists, checking out...`));
-		await gitExec(repoPath, ['checkout', branchName]);
+		try {
+			await gitExec(repoPath, ['checkout', branchName]);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.includes('already used by worktree')) {
+				const wtPath = getWorktreePath(repoPath, ticketKey);
+				if (existsSync(wtPath)) {
+					console.log(chalk.yellow(`  Branch held by existing worktree at ${wtPath}, reusing it.`));
+					return wtPath;
+				}
+				console.log(chalk.yellow('  Stale worktree reference detected, pruning...'));
+				await gitExec(repoPath, ['worktree', 'prune']);
+				await gitExec(repoPath, ['checkout', branchName]);
+			} else {
+				throw err;
+			}
+		}
 	} else {
 		console.log(chalk.gray(`  Creating branch ${branchName} from ${baseBranch}...`));
-		await gitExec(repoPath, ['checkout', '-b', branchName]);
+		try {
+			await gitExec(repoPath, ['checkout', '-b', branchName]);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.includes('already used by worktree')) {
+				const wtPath = getWorktreePath(repoPath, ticketKey);
+				if (existsSync(wtPath)) {
+					console.log(chalk.yellow(`  Branch held by existing worktree at ${wtPath}, reusing it.`));
+					return wtPath;
+				}
+				console.log(chalk.yellow('  Stale worktree reference detected, pruning...'));
+				await gitExec(repoPath, ['worktree', 'prune']);
+				await gitExec(repoPath, ['checkout', '-b', branchName]);
+			} else {
+				throw err;
+			}
+		}
 	}
 
 	const cacheKey = `branch-state-${ticketKey.toUpperCase()}`;
@@ -172,6 +204,24 @@ export async function prepareRepoForWork(
 
 	console.log(chalk.green(`  Ready on branch ${branchName}`));
 	return repoPath;
+}
+
+function isEnoent(err: unknown): boolean {
+	return err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+async function buildManualMrUrl(
+	repoPath: string,
+	branchName: string,
+	baseBranch: string,
+	platform: 'github' | 'gitlab',
+): Promise<string> {
+	const remoteUrl = await gitExec(repoPath, ['remote', 'get-url', 'origin']);
+	const httpsUrl = remoteUrl.replace(/\.git$/, '').replace(/^git@([^:]+):/, 'https://$1/');
+	if (platform === 'github') {
+		return `${httpsUrl}/compare/${baseBranch}...${branchName}?expand=1`;
+	}
+	return `${httpsUrl}/-/merge_requests/new?merge_request[source_branch]=${branchName}&merge_request[target_branch]=${baseBranch}`;
 }
 
 async function detectGitPlatform(repoPath: string): Promise<'github' | 'gitlab' | 'unknown'> {
@@ -212,26 +262,46 @@ export async function pushBranchAndCreateMR(
 
 	if (platform === 'github') {
 		console.log(chalk.gray('  Creating GitHub PR...'));
-		const result = await execFileAsync(
-			'gh',
-			['pr', 'create', '--title', mrTitle, '--body', mrBody, '--base', baseBranch, '--head', branchName],
-			{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024 },
-		);
-		const prUrl = result.stdout.trim();
-		console.log(chalk.green(`  PR created: ${prUrl}`));
-		return prUrl;
+		try {
+			const result = await execFileAsync(
+				'gh',
+				['pr', 'create', '--title', mrTitle, '--body', mrBody, '--base', baseBranch, '--head', branchName],
+				{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024 },
+			);
+			const prUrl = result.stdout.trim();
+			console.log(chalk.green(`  PR created: ${prUrl}`));
+			return prUrl;
+		} catch (err: unknown) {
+			if (isEnoent(err)) {
+				console.log(chalk.yellow('  gh CLI not found. Install it with: brew install gh'));
+				const manualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'github');
+				console.log(chalk.cyan(`  Create PR manually: ${manualUrl}`));
+				return manualUrl;
+			}
+			throw err;
+		}
 	}
 
 	if (platform === 'gitlab') {
 		console.log(chalk.gray('  Creating GitLab MR...'));
-		const result = await execFileAsync(
-			'glab',
-			['mr', 'create', '--title', mrTitle, '--description', mrBody, '--source-branch', branchName, '--target-branch', baseBranch, '--yes'],
-			{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024 },
-		);
-		const mrUrl = result.stdout.trim();
-		console.log(chalk.green(`  MR created: ${mrUrl}`));
-		return mrUrl;
+		try {
+			const result = await execFileAsync(
+				'glab',
+				['mr', 'create', '--title', mrTitle, '--description', mrBody, '--source-branch', branchName, '--target-branch', baseBranch, '--yes'],
+				{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024 },
+			);
+			const mrUrl = result.stdout.trim();
+			console.log(chalk.green(`  MR created: ${mrUrl}`));
+			return mrUrl;
+		} catch (err: unknown) {
+			if (isEnoent(err)) {
+				console.log(chalk.yellow('  glab CLI not found. Install it with: brew install glab'));
+				const manualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'gitlab');
+				console.log(chalk.cyan(`  Create MR manually: ${manualUrl}`));
+				return manualUrl;
+			}
+			throw err;
+		}
 	}
 
 	console.log(chalk.yellow('  Could not detect GitHub or GitLab. Branch pushed but MR/PR not created.'));

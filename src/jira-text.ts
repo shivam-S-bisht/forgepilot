@@ -258,7 +258,7 @@ export function buildWorkPrompt(
 
 	sections.push(
 		'=== CONSTRAINTS ===',
-		'- Do NOT commit or push any changes. Leave all changes unstaged for manual review.',
+		'- Commit changes gradually as you complete logical units of work. Use the format: [BRANCH_NAME] <concise description>. For example: [CE-1234] Add input validation for email field. Do NOT push to remote.',
 		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
 		'- Prefer editing existing files over creating new ones.',
