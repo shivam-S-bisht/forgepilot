@@ -206,6 +206,99 @@ export async function prepareRepoForWork(
 	return repoPath;
 }
 
+type RepoIdentifier = { host: string; owner: string; repo: string };
+
+async function parseRepoIdentifier(repoPath: string): Promise<RepoIdentifier> {
+	const remoteUrl = await gitExec(repoPath, ['remote', 'get-url', 'origin']);
+
+	// SSH: git@gitlab.com:org/repo.git
+	const sshMatch = remoteUrl.match(/^git@([^:]+):(.+?)(?:\.git)?$/);
+	if (sshMatch) {
+		const [, host, fullPath] = sshMatch;
+		const parts = fullPath.split('/');
+		const repo = parts.pop()!;
+		const owner = parts.join('/');
+		return { host, owner, repo };
+	}
+
+	// HTTPS: https://github.com/org/repo.git
+	const httpsMatch = remoteUrl.match(/^https?:\/\/([^/]+)\/(.+?)(?:\.git)?$/);
+	if (httpsMatch) {
+		const [, host, fullPath] = httpsMatch;
+		const parts = fullPath.split('/');
+		const repo = parts.pop()!;
+		const owner = parts.join('/');
+		return { host, owner, repo };
+	}
+
+	throw new Error(`Could not parse remote URL: ${remoteUrl}`);
+}
+
+async function createGitHubPR(
+	repoId: RepoIdentifier,
+	branchName: string,
+	baseBranch: string,
+	title: string,
+	body: string,
+): Promise<string> {
+	const token = process.env.FORGEPILOT_GITHUB_TOKEN?.trim();
+	if (!token) throw new Error('FORGEPILOT_GITHUB_TOKEN not set');
+
+	const response = await fetch(`https://api.github.com/repos/${repoId.owner}/${repoId.repo}/pulls`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Accept: 'application/vnd.github+json',
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ title, body, head: branchName, base: baseBranch }),
+	});
+
+	if (!response.ok) {
+		const err = await response.text();
+		throw new Error(`GitHub API error (${response.status}): ${err}`);
+	}
+
+	const data = (await response.json()) as { html_url: string };
+	return data.html_url;
+}
+
+async function createGitLabMR(
+	repoId: RepoIdentifier,
+	branchName: string,
+	baseBranch: string,
+	title: string,
+	description: string,
+): Promise<string> {
+	const token = process.env.FORGEPILOT_GITLAB_TOKEN?.trim();
+	if (!token) throw new Error('FORGEPILOT_GITLAB_TOKEN not set');
+
+	const projectPath = encodeURIComponent(`${repoId.owner}/${repoId.repo}`);
+	const apiBase = `https://${repoId.host}/api/v4`;
+
+	const response = await fetch(`${apiBase}/projects/${projectPath}/merge_requests`, {
+		method: 'POST',
+		headers: {
+			'PRIVATE-TOKEN': token,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			title,
+			description,
+			source_branch: branchName,
+			target_branch: baseBranch,
+		}),
+	});
+
+	if (!response.ok) {
+		const err = await response.text();
+		throw new Error(`GitLab API error (${response.status}): ${err}`);
+	}
+
+	const data = (await response.json()) as { web_url: string };
+	return data.web_url;
+}
+
 function isEnoent(err: unknown): boolean {
 	return err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT';
 }
@@ -262,6 +355,8 @@ export async function pushBranchAndCreateMR(
 
 	if (platform === 'github') {
 		console.log(chalk.gray('  Creating GitHub PR...'));
+
+		// 1. Try gh CLI
 		try {
 			const result = await execFileAsync(
 				'gh',
@@ -272,18 +367,31 @@ export async function pushBranchAndCreateMR(
 			console.log(chalk.green(`  PR created: ${prUrl}`));
 			return prUrl;
 		} catch (err: unknown) {
-			if (isEnoent(err)) {
-				console.log(chalk.yellow('  gh CLI not found. Install it with: brew install gh'));
-				const manualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'github');
-				console.log(chalk.cyan(`  Create PR manually: ${manualUrl}`));
-				return manualUrl;
-			}
-			throw err;
+			if (!isEnoent(err)) throw err;
+			console.log(chalk.gray('  gh CLI not found, trying GitHub API...'));
 		}
+
+		// 2. Try GitHub API
+		try {
+			const repoId = await parseRepoIdentifier(repoPath);
+			const prUrl = await createGitHubPR(repoId, branchName, baseBranch, mrTitle, mrBody);
+			console.log(chalk.green(`  PR created via API: ${prUrl}`));
+			return prUrl;
+		} catch (apiErr: unknown) {
+			const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+			console.log(chalk.yellow(`  GitHub API failed: ${msg}`));
+		}
+
+		// 3. Fall back to manual URL
+		const ghManualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'github');
+		console.log(chalk.cyan(`  Create PR manually: ${ghManualUrl}`));
+		return ghManualUrl;
 	}
 
 	if (platform === 'gitlab') {
 		console.log(chalk.gray('  Creating GitLab MR...'));
+
+		// 1. Try glab CLI
 		try {
 			const result = await execFileAsync(
 				'glab',
@@ -294,14 +402,25 @@ export async function pushBranchAndCreateMR(
 			console.log(chalk.green(`  MR created: ${mrUrl}`));
 			return mrUrl;
 		} catch (err: unknown) {
-			if (isEnoent(err)) {
-				console.log(chalk.yellow('  glab CLI not found. Install it with: brew install glab'));
-				const manualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'gitlab');
-				console.log(chalk.cyan(`  Create MR manually: ${manualUrl}`));
-				return manualUrl;
-			}
-			throw err;
+			if (!isEnoent(err)) throw err;
+			console.log(chalk.gray('  glab CLI not found, trying GitLab API...'));
 		}
+
+		// 2. Try GitLab API
+		try {
+			const repoId = await parseRepoIdentifier(repoPath);
+			const mrUrl = await createGitLabMR(repoId, branchName, baseBranch, mrTitle, mrBody);
+			console.log(chalk.green(`  MR created via API: ${mrUrl}`));
+			return mrUrl;
+		} catch (apiErr: unknown) {
+			const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+			console.log(chalk.yellow(`  GitLab API failed: ${msg}`));
+		}
+
+		// 3. Fall back to manual URL
+		const glManualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'gitlab');
+		console.log(chalk.cyan(`  Create MR manually: ${glManualUrl}`));
+		return glManualUrl;
 	}
 
 	console.log(chalk.yellow('  Could not detect GitHub or GitLab. Branch pushed but MR/PR not created.'));

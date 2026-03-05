@@ -185,6 +185,8 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FORGEPILOT_WORKTREE_DIR` | Directory for git worktrees during parallel execution | `~/.forgepilot-worktrees/` |
+| `FORGEPILOT_GITHUB_TOKEN` | GitHub Personal Access Token for creating PRs via API (used when `gh` CLI is not installed) | *(falls back to manual URL)* |
+| `FORGEPILOT_GITLAB_TOKEN` | GitLab Personal Access Token for creating MRs via API (used when `glab` CLI is not installed) | *(falls back to manual URL)* |
 
 ### Slack
 
