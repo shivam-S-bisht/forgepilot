@@ -8,6 +8,8 @@ import { getCached, setCached } from './src/cache.js';
 import { runAutoMode, startInteractiveCli } from './src/cli.js';
 import { fetchBoards, fetchTicketsByScope } from './src/jira.js';
 import type { TicketScope } from './src/jira.js';
+import { slackPickScope, startSlackCli } from './src/slack-cli.js';
+import { isSlackFullFlowEnabled } from './src/slack.js';
 import { renderScopePicker } from './src/ui.js';
 import type { ScopeOption } from './src/ui.js';
 
@@ -128,6 +130,8 @@ async function main() {
 		} else if (auto) {
 			scope = 'current-sprint';
 			console.log(chalk.gray('Auto mode: defaulting to current-sprint scope'));
+		} else if (isSlackFullFlowEnabled()) {
+			scope = await slackPickScope();
 		} else {
 			scope = await pickScope(cachedScope);
 		}
@@ -157,7 +161,11 @@ async function main() {
 			process.exit(failed > 0 ? 1 : 0);
 		}
 
-		await startInteractiveCli(tickets, boards);
+		if (isSlackFullFlowEnabled()) {
+			await startSlackCli(tickets, boards);
+		} else {
+			await startInteractiveCli(tickets, boards);
+		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(`Error: ${message}`);

@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
 import { getDescriptionText } from './jira-text.js';
+import { postAndWaitForSelection } from './slack.js';
+import type { SlackPickOption } from './slack.js';
 import type { JiraIssueDetail, RepoLabel, TicketRepoResolution } from './types.js';
 import { renderRepoPicker } from './ui.js';
 
@@ -270,6 +272,72 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 
 	if (!repoMap.size) {
 		throw new Error('No repositories resolved. Cannot proceed.');
+	}
+
+	return repoMap;
+}
+
+export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise<Map<string, string>> {
+	const description = getDescriptionText(detail);
+	const ticketRepos = extractRepoLabels(description);
+	const repoMap = new Map<string, string>();
+
+	let rootDir = await getCached<string>('rootDir');
+	if (!rootDir) {
+		throw new Error('Root directory not cached. Run ForgePilot in terminal first to set it, or set FORGEPILOT_ROOT_DIR.');
+	}
+
+	const localRepoPaths = await scanLocalRepos(rootDir);
+
+	if (ticketRepos.length) {
+		const remoteIndex = new Map<string, string>();
+		for (const localPath of localRepoPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+			}
+		}
+
+		for (const repo of ticketRepos) {
+			const localPath = remoteIndex.get(repo.normalizedUrl);
+			if (localPath) {
+				repoMap.set(repo.normalizedUrl, localPath);
+			}
+		}
+
+		if (repoMap.size > 0) return repoMap;
+	}
+
+	const cacheKey = `repoChoice_${detail.key}`;
+	const cached = await getCached<string[]>(cacheKey);
+	if (cached?.length) {
+		const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
+		if (allValid) {
+			for (const p of cached) repoMap.set(path.basename(p), p);
+			return repoMap;
+		}
+	}
+
+	if (!localRepoPaths.length) {
+		throw new Error(`No git repos found under ${rootDir}. Cannot resolve repos via Slack.`);
+	}
+
+	const options: SlackPickOption[] = localRepoPaths.map((p) => ({
+		id: p,
+		label: `${path.basename(p)} — ${p}`,
+	}));
+
+	const selectedPaths = await postAndWaitForSelection(
+		`Select repo(s) for *${detail.key}*:`,
+		options,
+		true,
+	);
+
+	if (!selectedPaths.length) throw new Error('No repos selected via Slack.');
+
+	await setCached(cacheKey, selectedPaths);
+	for (const p of selectedPaths) {
+		repoMap.set(path.basename(p), p);
 	}
 
 	return repoMap;

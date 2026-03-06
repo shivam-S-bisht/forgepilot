@@ -192,10 +192,35 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `FORGEPILOT_SLACK_QA` | Set to `true` to enable Slack-driven workflow (replaces TUI) | `false` |
 | `FORGEPILOT_SLACK_WEBHOOK_URL` | Incoming Webhook URL for notifications | *(disabled)* |
 | `FORGEPILOT_SLACK_BOT_TOKEN` | Bot OAuth Token for Q&A via threads | *(disabled)* |
 | `FORGEPILOT_SLACK_CHANNEL_ID` | Channel ID for bot messages | *(required if bot token set)* |
 | `FORGEPILOT_SLACK_USER_ID` | Your Slack user ID for mentions | *(optional)* |
+| `FORGEPILOT_SLACK_EXPECTED_USER_ID` | Only accept replies from this Slack user ID | *(any user)* |
+| `FORGEPILOT_SLACK_POLL_INTERVAL_MS` | How often to poll for Slack replies (ms) | `5000` |
+| `FORGEPILOT_SLACK_ANSWER_TIMEOUT_MS` | Timeout waiting for Slack replies (ms) | `600000` (10 min) |
+
+### Slack-Driven Workflow
+
+When `FORGEPILOT_SLACK_QA=true` with `FORGEPILOT_SLACK_BOT_TOKEN` and `FORGEPILOT_SLACK_CHANNEL_ID` set, ForgePilot replaces the terminal TUI with a fully Slack-driven workflow:
+
+1. **Scope selection** — bot posts numbered options, you reply with a number
+2. **Ticket selection** — bot lists tickets, you reply with number(s) (comma-separated for multi-select)
+3. **Agent selection** — bot lists available agents, you reply with a number
+4. **Repo selection** — if repos can't be auto-resolved, bot lists local repos for you to pick
+5. **Mid-work Q&A** — if the agent has questions, they're routed to Slack
+6. **Post-agent actions** — bot offers push/MR, retry, or done
+
+All interactions happen via thread replies. The terminal just shows execution logs.
+
+```bash
+export FORGEPILOT_SLACK_QA="true"
+export FORGEPILOT_SLACK_BOT_TOKEN="xoxb-your-bot-token"
+export FORGEPILOT_SLACK_CHANNEL_ID="C0123456789"
+export FORGEPILOT_SLACK_EXPECTED_USER_ID="U0123456789"  # optional
+forgepilot
+```
 
 ### Fully Hands-Free Mode
 

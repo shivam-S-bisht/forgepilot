@@ -213,6 +213,65 @@ export async function askQuestionViaSlack(
 	throw new Error(`Timed out waiting for Slack response for agent question on ${ticketKey}.`);
 }
 
+export type SlackPickOption = { id: string; label: string };
+
+export async function postAndWaitForSelection(
+	prompt: string,
+	options: SlackPickOption[],
+	allowMultiple = false,
+): Promise<string[]> {
+	const channel = getRequiredEnv('FORGEPILOT_SLACK_CHANNEL_ID');
+	const expectedUserId = process.env.FORGEPILOT_SLACK_EXPECTED_USER_ID?.trim();
+	const pollIntervalMs = Number(process.env.FORGEPILOT_SLACK_POLL_INTERVAL_MS ?? '5000');
+	const timeoutMs = Number(process.env.FORGEPILOT_SLACK_ANSWER_TIMEOUT_MS ?? `${10 * 60 * 1000}`);
+
+	const numbered = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n');
+	const hint = allowMultiple
+		? 'Reply with number(s), comma-separated (e.g. `1,3,5`)'
+		: 'Reply with a number';
+
+	const lines = [
+		`:robot_face: *ForgePilot*`,
+		'',
+		prompt,
+		'',
+		numbered,
+		'',
+		`---`,
+		`*${hint}* in this thread.`,
+		...(expectedUserId ? [`Only replies from <@${expectedUserId}> will be accepted.`] : []),
+	];
+
+	const messageTs = await postMessage(channel, lines.join('\n'));
+
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const replies = await fetchThreadReplies(channel, messageTs);
+		if (!replies.ok) {
+			throw new Error(`Slack conversations.replies failed: ${replies.error ?? 'unknown error'}`);
+		}
+		const answer = extractUserAnswer(replies, messageTs, expectedUserId);
+		if (answer) {
+			const nums = answer
+				.split(/[,\s]+/)
+				.map((s) => parseInt(s.trim(), 10))
+				.filter((n) => !isNaN(n) && n >= 1 && n <= options.length);
+
+			if (nums.length > 0) {
+				const selected = allowMultiple ? nums : [nums[0]];
+				return selected.map((n) => options[n - 1].id);
+			}
+		}
+		await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+	}
+
+	throw new Error('Timed out waiting for Slack selection.');
+}
+
 export function shouldUseSlackQa(): boolean {
 	return isSlackQaEnabled();
+}
+
+export function isSlackFullFlowEnabled(): boolean {
+	return isSlackQaEnabled() && canPostToSlackChannel();
 }
