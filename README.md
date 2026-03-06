@@ -265,14 +265,28 @@ When you select a ticket and launch an agent, ForgePilot:
 
 1. **Resolves repositories** — extracts repo URLs from the Jira ticket description, matches them to local repos under your root directory, or presents a TUI picker
 2. **Prepares the repo** — stashes changes, fetches latest, checks out base branch, creates a ticket branch (e.g. `CE-1234`)
-3. **Runs preflight checks** — AI-powered analysis of the ticket for potential concerns, with Q&A via Slack or terminal
-4. **Fetches Figma designs** — if Figma links are found, fetches node structure, rendered images, and design tokens
-5. **Injects Axon context** — if an Axon knowledge graph exists in the repo, adds structural reasoning protocol to the prompt
-6. **Builds a rich prompt** — structured with role, task, workflow steps, ticket context, constraints, contributing guidelines, design context, and clarifications
-7. **Launches the AI agent** — in the repo directory with the full prompt
-8. **Transitions the ticket** — marks it "In Progress" in Jira
-9. **Notifies Slack** — sends status updates on start, completion, or failure
-10. **Post-agent options** — push branch, create MR/PR (auto-detects GitHub/GitLab), retry, or go back
+3. **Checks for checkpoints** — if a previous run was interrupted, detects the existing todo file and offers resume options (see below)
+4. **Runs preflight checks** — AI-powered analysis of the ticket for potential concerns, with Q&A via Slack or terminal
+5. **Fetches Figma designs** — if Figma links are found, fetches node structure, rendered images, and design tokens
+6. **Injects Axon context** — if an Axon knowledge graph exists in the repo, adds structural reasoning protocol to the prompt
+7. **Builds a rich prompt** — structured with role, task, workflow steps, ticket context, constraints, contributing guidelines, design context, and clarifications
+8. **Launches the AI agent** — in the repo directory with the full prompt
+9. **Transitions the ticket** — marks it "In Progress" in Jira
+10. **Notifies Slack** — sends status updates on start, completion, or failure
+11. **Post-agent options** — push branch, create MR/PR (auto-detects GitHub/GitLab), retry, or go back
+
+### Checkpoint / Resume
+
+ForgePilot uses a todo-driven workflow where AI agents create a `.forgepilot-todos-<TICKET_KEY>.md` checklist and work through it item by item, committing after each task.
+
+If the agent is interrupted (crash, Ctrl+C, timeout), the todo file and checkpoint metadata are preserved. On the next run for the same ticket, ForgePilot detects the existing progress and offers 4 options:
+
+1. **Resume from checkpoint** — continue from the first unchecked item, skipping completed work
+2. **Start fresh** — discard all progress and start over from scratch
+3. **Re-analyze ticket** — discard the old todo list, let the agent create a fresh plan
+4. **Show current progress** — display completed/pending items, then choose from the above options
+
+Checkpoint metadata (agent used, timestamp, repo path) is stored in `.cache/checkpoint-<TICKET_KEY>.json`. The resume prompt is shown via Slack when the Slack flow is active, or in the terminal otherwise.
 
 ## MCP Server
 

@@ -6,16 +6,170 @@ import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from './axon.js';
+import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from './figma.js';
 import { prepareRepoForWork, readContributing, removeWorktree } from './git.js';
 import { transitionIssueToInProgress } from './jira.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
-import { askQuestionViaSlack, notifySlackStatus, shouldUseSlackQa } from './slack.js';
+import { askQuestionViaSlack, isSlackFullFlowEnabled, notifySlackStatus, postAndWaitForSelection, shouldUseSlackQa } from './slack.js';
+import type { SlackPickOption } from './slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
 
 const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// Checkpoint types and helpers
+// ---------------------------------------------------------------------------
+
+type CheckpointState = {
+	ticketKey: string;
+	agentId: string;
+	agentLabel: string;
+	repoPath: string;
+	effectivePath: string;
+	startedAt: string;
+	lastUpdatedAt: string;
+};
+
+type TodoProgress = {
+	total: number;
+	completed: number;
+	pending: string[];
+	completedItems: string[];
+};
+
+function todoFilePath(repoPath: string, ticketKey: string): string {
+	return path.join(repoPath, `.forgepilot-todos-${ticketKey.toUpperCase()}.md`);
+}
+
+function checkpointCacheKey(ticketKey: string): string {
+	return `checkpoint-${ticketKey.toUpperCase()}`;
+}
+
+async function saveCheckpoint(ticketKey: string, state: CheckpointState): Promise<void> {
+	await setCached(checkpointCacheKey(ticketKey), state);
+}
+
+async function loadCheckpoint(ticketKey: string): Promise<CheckpointState | null> {
+	return getCached<CheckpointState>(checkpointCacheKey(ticketKey));
+}
+
+async function clearCheckpoint(ticketKey: string): Promise<void> {
+	await clearCached(checkpointCacheKey(ticketKey));
+}
+
+async function parseTodoProgress(repoPath: string, ticketKey: string): Promise<TodoProgress | null> {
+	const filePath = todoFilePath(repoPath, ticketKey);
+	if (!existsSync(filePath)) return null;
+	try {
+		const content = await fs.readFile(filePath, 'utf8');
+		const lines = content.split('\n');
+		const completed: string[] = [];
+		const pending: string[] = [];
+
+		for (const line of lines) {
+			const checkedMatch = line.match(/^-\s*\[x\]\s+(.+)/i);
+			const uncheckedMatch = line.match(/^-\s*\[\s\]\s+(.+)/);
+			if (checkedMatch) completed.push(checkedMatch[1].trim());
+			else if (uncheckedMatch) pending.push(uncheckedMatch[1].trim());
+		}
+
+		const total = completed.length + pending.length;
+		if (total === 0) return null;
+		return { total, completed: completed.length, pending, completedItems: completed };
+	} catch {
+		return null;
+	}
+}
+
+type ResumeChoice = 'resume' | 'fresh' | 're-analyze' | 'show-progress';
+
+async function promptForResume(
+	ticketKey: string,
+	progress: TodoProgress,
+	checkpoint: CheckpointState | null,
+): Promise<ResumeChoice> {
+	const header = `Checkpoint found for *${ticketKey}*: ${progress.completed}/${progress.total} tasks completed.`;
+	const agentInfo = checkpoint ? ` Last agent: ${checkpoint.agentLabel} (${new Date(checkpoint.lastUpdatedAt).toLocaleString()}).` : '';
+
+	const options: { id: ResumeChoice; label: string }[] = [
+		{ id: 'resume', label: 'Resume from checkpoint — continue where the agent left off' },
+		{ id: 'fresh', label: 'Start fresh — discard progress and start over' },
+		{ id: 're-analyze', label: 'Re-analyze ticket — discard todos, let agent re-plan from scratch' },
+		{ id: 'show-progress', label: 'Show current progress — view completed/pending items, then decide' },
+	];
+
+	if (isSlackFullFlowEnabled()) {
+		console.log(chalk.yellow(`\n  ${header}${agentInfo}`));
+		console.log(chalk.gray('  Asking via Slack...'));
+		const slackOptions: SlackPickOption[] = options.map((o) => ({ id: o.id, label: o.label }));
+		const [selected] = await postAndWaitForSelection(`${header}${agentInfo}`, slackOptions);
+		return selected as ResumeChoice;
+	}
+
+	console.log(chalk.yellow(`\n  ${header}${agentInfo}`));
+	console.log('');
+	for (let i = 0; i < options.length; i++) {
+		console.log(chalk.cyan(`  ${i + 1}. ${options[i].label}`));
+	}
+	console.log('');
+
+	const answer = await askLine(chalk.cyan('  Choose (1-4): '));
+	const num = parseInt(answer, 10);
+	if (num >= 1 && num <= 4) return options[num - 1].id;
+	return 'resume';
+}
+
+function displayTodoProgress(ticketKey: string, progress: TodoProgress): void {
+	console.log(chalk.bold(`\n  Todo progress for ${ticketKey} (${progress.completed}/${progress.total}):\n`));
+	for (const item of progress.completedItems) {
+		console.log(chalk.green(`    [x] ${item}`));
+	}
+	for (const item of progress.pending) {
+		console.log(chalk.yellow(`    [ ] ${item}`));
+	}
+	console.log('');
+}
+
+async function handleCheckpointResume(
+	effectivePath: string,
+	ticketKey: string,
+): Promise<{ resumeMode: boolean }> {
+	const progress = await parseTodoProgress(effectivePath, ticketKey);
+	if (!progress) return { resumeMode: false };
+
+	const checkpoint = await loadCheckpoint(ticketKey);
+	let choice = await promptForResume(ticketKey, progress, checkpoint);
+
+	if (choice === 'show-progress') {
+		displayTodoProgress(ticketKey, progress);
+		if (isSlackFullFlowEnabled()) {
+			const progressLines = [
+				`:clipboard: *Todo progress for ${ticketKey}* (${progress.completed}/${progress.total}):`,
+				'',
+				...progress.completedItems.map((item) => `:white_check_mark: ~${item}~`),
+				...progress.pending.map((item) => `:black_square_button: ${item}`),
+			].join('\n');
+			await notifySlackStatus(progressLines);
+		}
+		choice = await promptForResume(ticketKey, progress, checkpoint);
+	}
+
+	if (choice === 'resume') {
+		console.log(chalk.green(`  Resuming from checkpoint (${progress.completed}/${progress.total} done).`));
+		await notifySlackStatus(`Resuming ${ticketKey} from checkpoint: ${progress.completed}/${progress.total} tasks already completed.`);
+		return { resumeMode: true };
+	}
+
+	console.log(chalk.gray(`  Discarding checkpoint for ${ticketKey}. Starting ${choice === 're-analyze' ? 'with re-analysis' : 'fresh'}...`));
+	const todoFile = todoFilePath(effectivePath, ticketKey);
+	try { await fs.unlink(todoFile); } catch { /* ignore */ }
+	await clearCheckpoint(ticketKey);
+	await notifySlackStatus(`Discarded checkpoint for ${ticketKey}. Starting ${choice === 're-analyze' ? 'with re-analysis' : 'fresh'}.`);
+	return { resumeMode: false };
+}
 
 async function cleanupTodoFiles(repoPath: string): Promise<void> {
 	try {
@@ -364,6 +518,8 @@ export async function launchAgentForRepos(
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
 			const effectivePath = await prepareRepoForWork(repoPath, detail.key);
 
+			const { resumeMode } = await handleCheckpointResume(effectivePath, detail.key);
+
 			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
 			if (contributing) {
 				console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${effectivePath}`));
@@ -377,8 +533,20 @@ export async function launchAgentForRepos(
 			const maxQaRounds = 5;
 
 			for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
-				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers);
-				console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ...`));
+				const isResume = resumeMode && qaRound === 0;
+				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume);
+
+				await saveCheckpoint(detail.key, {
+					ticketKey: detail.key,
+					agentId: agentOption.id,
+					agentLabel: agentOption.label,
+					repoPath,
+					effectivePath,
+					startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+					lastUpdatedAt: new Date().toISOString(),
+				});
+
+				console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ${isResume ? '(resuming from checkpoint) ' : ''}...`));
 				await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
 
 				const questions = await readQuestionsFile(effectivePath, detail.key);
@@ -396,10 +564,12 @@ export async function launchAgentForRepos(
 
 			await cleanupTodoFiles(effectivePath);
 			await cleanupQuestionFiles(effectivePath);
+			await clearCheckpoint(detail.key);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			console.log(chalk.yellow(`  Checkpoint preserved for ${detail.key}. Resume on next run.`));
 			await notifySlackStatus(
-				`ForgePilot error for ${detail.key} in ${repoPath} using ${agentOption.label}: ${message}`,
+				`ForgePilot error for ${detail.key} in ${repoPath} using ${agentOption.label}: ${message}. Checkpoint preserved for resume.`,
 			);
 			throw error;
 		} finally {
@@ -473,6 +643,8 @@ export async function launchMultipleTickets(
 					const effectivePath = await prepareRepoForWork(repoPath, detail.key, useWorktree);
 					if (useWorktree) worktreePaths.push(effectivePath);
 
+					const { resumeMode } = await handleCheckpointResume(effectivePath, detail.key);
+
 					const contributing =
 						repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
 					const axonHint = getAxonPromptHint(effectivePath);
@@ -482,7 +654,19 @@ export async function launchMultipleTickets(
 					const maxQaRounds = 5;
 
 					for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
-						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers);
+						const isResume = resumeMode && qaRound === 0;
+						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume);
+
+						await saveCheckpoint(detail.key, {
+							ticketKey: detail.key,
+							agentId: agentOption.id,
+							agentLabel: agentOption.label,
+							repoPath,
+							effectivePath,
+							startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+							lastUpdatedAt: new Date().toISOString(),
+						});
+
 						await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
 
 						const questions = await readQuestionsFile(effectivePath, detail.key);
@@ -497,6 +681,7 @@ export async function launchMultipleTickets(
 
 					await cleanupTodoFiles(effectivePath);
 					await cleanupQuestionFiles(effectivePath);
+					await clearCheckpoint(detail.key);
 				} finally {
 					stopAxonWatch(axonChild);
 				}

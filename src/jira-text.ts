@@ -188,6 +188,7 @@ export function buildWorkPrompt(
 	axonHint = '',
 	figmaSection = '',
 	priorAnswers = '',
+	resumeFromCheckpoint = false,
 ): string {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
@@ -332,6 +333,18 @@ export function buildWorkPrompt(
 			'',
 			'=== END ANSWERS ===',
 			`Continue working from where you left off. Check ${todoFile} for progress.`,
+			'',
+		);
+	}
+
+	if (resumeFromCheckpoint) {
+		sections.push(
+			'=== CHECKPOINT RESUME ===',
+			'You were previously working on this ticket and were interrupted.',
+			`Your todo file (${todoFile}) already exists with progress.`,
+			'Items marked with [x] are already completed — do NOT redo them.',
+			'Continue from the first unchecked item ([ ]). Do NOT recreate the todo file.',
+			'Pick up exactly where you left off and follow the same WORKFLOW from step 5 (IMPLEMENT).',
 			'',
 		);
 	}

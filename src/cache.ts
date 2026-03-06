@@ -49,6 +49,15 @@ export async function getAllCache(): Promise<CacheData> {
 	return data;
 }
 
+export async function clearCached(key: string): Promise<void> {
+	const filePath = cacheFilePath(key);
+	try {
+		await fs.unlink(filePath);
+	} catch {
+		// Ignore if file doesn't exist.
+	}
+}
+
 export async function clearCache(): Promise<void> {
 	if (existsSync(CACHE_DIR)) {
 		await fs.rm(CACHE_DIR, { recursive: true, force: true });
