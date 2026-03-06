@@ -287,9 +287,12 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 		throw new Error('Root directory not cached. Run ForgePilot in terminal first to set it, or set FORGEPILOT_ROOT_DIR.');
 	}
 
+	console.log(chalk.gray(`  Scanning repos under ${rootDir}...`));
 	const localRepoPaths = await scanLocalRepos(rootDir);
+	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
 
 	if (ticketRepos.length) {
+		console.log(chalk.gray(`  Found ${ticketRepos.length} repo URL(s) in ticket description. Auto-matching...`));
 		const remoteIndex = new Map<string, string>();
 		for (const localPath of localRepoPaths) {
 			const remotes = await getRemoteUrls(localPath);
@@ -302,10 +305,12 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 			const localPath = remoteIndex.get(repo.normalizedUrl);
 			if (localPath) {
 				repoMap.set(repo.normalizedUrl, localPath);
+				console.log(chalk.green(`  Auto-matched repo: ${repo.label} → ${localPath}`));
 			}
 		}
 
 		if (repoMap.size > 0) return repoMap;
+		console.log(chalk.yellow(`  No auto-matches found.`));
 	}
 
 	const cacheKey = `repoChoice_${detail.key}`;
@@ -313,7 +318,10 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 	if (cached?.length) {
 		const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
 		if (allValid) {
-			for (const p of cached) repoMap.set(path.basename(p), p);
+			for (const p of cached) {
+				repoMap.set(path.basename(p), p);
+				console.log(chalk.green(`  Using cached repo: ${path.basename(p)} → ${p}`));
+			}
 			return repoMap;
 		}
 	}
@@ -322,6 +330,7 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 		throw new Error(`No git repos found under ${rootDir}. Cannot resolve repos via Slack.`);
 	}
 
+	console.log(chalk.gray(`  Posting repo selection to Slack...`));
 	const options: SlackPickOption[] = localRepoPaths.map((p) => ({
 		id: p,
 		label: `${path.basename(p)} — ${p}`,
@@ -338,6 +347,7 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 	await setCached(cacheKey, selectedPaths);
 	for (const p of selectedPaths) {
 		repoMap.set(path.basename(p), p);
+		console.log(chalk.green(`  Selected repo: ${path.basename(p)} → ${p} (via Slack)`));
 	}
 
 	return repoMap;

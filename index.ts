@@ -91,6 +91,7 @@ function printActiveConfig() {
 		['FORGEPILOT_DEFAULT_AGENT', process.env.FORGEPILOT_DEFAULT_AGENT],
 		['FORGEPILOT_AUTO_ALL_TICKETS', process.env.FORGEPILOT_AUTO_ALL_TICKETS],
 		['FORGEPILOT_SKIP_DETAIL', process.env.FORGEPILOT_SKIP_DETAIL],
+		['FORGEPILOT_AUTO_PUSH', process.env.FORGEPILOT_AUTO_PUSH],
 		['FORGEPILOT_BASE_BRANCH', process.env.FORGEPILOT_BASE_BRANCH],
 		['FORGEPILOT_AXON_VENV_PATH', process.env.FORGEPILOT_AXON_VENV_PATH],
 		['FORGEPILOT_FIGMA_PAT', process.env.FORGEPILOT_FIGMA_PAT ? '***' : undefined],
@@ -131,6 +132,7 @@ async function main() {
 			scope = 'current-sprint';
 			console.log(chalk.gray('Auto mode: defaulting to current-sprint scope'));
 		} else if (isSlackFullFlowEnabled()) {
+			console.log(chalk.bold('Slack flow enabled. Starting Slack-driven workflow...'));
 			scope = await slackPickScope();
 		} else {
 			scope = await pickScope(cachedScope);

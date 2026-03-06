@@ -155,7 +155,8 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 | `FORGEPILOT_TICKET_SCOPE` | Skip scope picker. `current` or `all` | *(interactive picker)* |
 | `FORGEPILOT_DEFAULT_AGENT` | Skip agent picker. Agent ID (see below) | *(interactive picker)* |
 | `FORGEPILOT_AUTO_ALL_TICKETS` | `true` to auto-select all tickets for parallel execution | `false` |
-| `FORGEPILOT_SKIP_DETAIL` | `true` to skip detail/brief view and launch agent immediately | `false` |
+| `FORGEPILOT_SKIP_DETAIL` | `true` to skip posting ticket description/AC to Slack and skip detail view in TUI | `false` |
+| `FORGEPILOT_AUTO_PUSH` | `true` to auto-push branch and create MR/PR after agent finishes (skips Slack/TUI prompt) | `false` |
 | `FORGEPILOT_BASE_BRANCH` | Base branch to create ticket branches from | `development` |
 
 ### Figma
@@ -212,7 +213,9 @@ When `FORGEPILOT_SLACK_QA=true` with `FORGEPILOT_SLACK_BOT_TOKEN` and `FORGEPILO
 5. **Mid-work Q&A** — if the agent has questions, they're routed to Slack
 6. **Post-agent actions** — bot offers push/MR, retry, or done
 
-All interactions happen via thread replies. The terminal just shows execution logs.
+All interactions happen via thread replies. The terminal shows verbose progress logs for every step.
+
+Set `FORGEPILOT_AUTO_PUSH=true` to skip the post-agent prompt and automatically push branches and create MR/PRs. Set `FORGEPILOT_SKIP_DETAIL=true` to skip posting ticket description/AC to Slack before agent launch.
 
 ```bash
 export FORGEPILOT_SLACK_QA="true"

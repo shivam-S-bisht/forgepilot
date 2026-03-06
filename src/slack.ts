@@ -1,3 +1,4 @@
+import chalk from 'chalk';
 import type { PreflightConcern } from './preflight.js';
 
 type SlackPostMessageResponse = {
@@ -104,6 +105,9 @@ async function postWebhookNotification(text: string): Promise<void> {
 
 export async function notifySlackStatus(text: string): Promise<void> {
 	if (!isSlackQaEnabled()) return;
+
+	const preview = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+	console.log(chalk.gray(`  [Slack] ${preview}`));
 
 	try {
 		if (canPostToSlackChannel()) {
@@ -242,7 +246,9 @@ export async function postAndWaitForSelection(
 		...(expectedUserId ? [`Only replies from <@${expectedUserId}> will be accepted.`] : []),
 	];
 
+	console.log(chalk.gray(`  Posted to Slack: "${prompt}"`));
 	const messageTs = await postMessage(channel, lines.join('\n'));
+	console.log(chalk.gray(`  Waiting for Slack reply...`));
 
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
@@ -259,6 +265,8 @@ export async function postAndWaitForSelection(
 
 			if (nums.length > 0) {
 				const selected = allowMultiple ? nums : [nums[0]];
+				const selectedLabels = selected.map((n) => options[n - 1].label).join(', ');
+				console.log(chalk.cyan(`  Slack reply: ${selectedLabels}`));
 				return selected.map((n) => options[n - 1].id);
 			}
 		}
