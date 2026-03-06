@@ -8,9 +8,11 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from './axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from './figma.js';
-import { prepareRepoForWork, readContributing, removeWorktree } from './git.js';
+import { fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree } from './git.js';
+import type { OpenPR, ReviewComment } from './git.js';
 import { transitionIssueToInProgress } from './jira.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
+import type { ReviewCommentForPrompt } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
 import { askQuestionViaSlack, isSlackFullFlowEnabled, notifySlackStatus, postAndWaitForSelection, shouldUseSlackQa } from './slack.js';
@@ -169,6 +171,111 @@ async function handleCheckpointResume(
 	await clearCheckpoint(ticketKey);
 	await notifySlackStatus(`Discarded checkpoint for ${ticketKey}. Starting ${choice === 're-analyze' ? 'with re-analysis' : 'fresh'}.`);
 	return { resumeMode: false };
+}
+
+// ---------------------------------------------------------------------------
+// MR/PR review comment handling
+// ---------------------------------------------------------------------------
+
+async function writeTodosFromReviewComments(
+	repoPath: string,
+	ticketKey: string,
+	title: string,
+	comments: ReviewComment[],
+): Promise<void> {
+	const filePath = todoFilePath(repoPath, ticketKey);
+	const lines = [
+		`# ${ticketKey}: ${title} — Review Feedback`,
+		'',
+		...comments.map((c) => {
+			const location = c.line ? `${c.path}:${c.line}` : c.path || 'general';
+			return `- [ ] Address review: ${location} — "${c.body}" (@${c.author})`;
+		}),
+		'',
+	];
+	await fs.writeFile(filePath, lines.join('\n'), 'utf8');
+}
+
+type ReviewDetectionResult = {
+	reviewMode: boolean;
+	reviewComments: ReviewCommentForPrompt[];
+};
+
+async function handleReviewDetection(
+	effectivePath: string,
+	ticketKey: string,
+	title: string,
+): Promise<ReviewDetectionResult> {
+	const noReview: ReviewDetectionResult = { reviewMode: false, reviewComments: [] };
+
+	let pr: OpenPR | null = null;
+	try {
+		pr = await findOpenPullRequest(effectivePath, ticketKey);
+	} catch {
+		return noReview;
+	}
+	if (!pr) return noReview;
+
+	console.log(chalk.gray(`  Found open ${pr.platform === 'github' ? 'PR' : 'MR'}: ${pr.url || `#${pr.number}`}`));
+
+	let comments: ReviewComment[] = [];
+	try {
+		comments = await fetchUnresolvedReviewComments(effectivePath, pr);
+	} catch {
+		return noReview;
+	}
+
+	if (!comments.length) {
+		console.log(chalk.gray('  No unresolved review comments found.'));
+		return noReview;
+	}
+
+	console.log(chalk.yellow(`\n  Found ${comments.length} unresolved review comment(s) on ${pr.platform === 'github' ? 'PR' : 'MR'} #${pr.number}:`));
+	for (const c of comments) {
+		const location = c.line ? `${c.path}:${c.line}` : c.path || 'general';
+		console.log(chalk.cyan(`    [${location}] @${c.author}: ${c.body.slice(0, 100)}${c.body.length > 100 ? '...' : ''}`));
+	}
+	console.log('');
+
+	const options: { id: string; label: string }[] = [
+		{ id: 'address', label: 'Address review comments — create todos from feedback' },
+		{ id: 'ignore', label: 'Ignore — continue normally (checkpoint/fresh)' },
+	];
+
+	let choice = 'address';
+	if (isSlackFullFlowEnabled()) {
+		const slackOptions: SlackPickOption[] = options.map((o) => ({ id: o.id, label: o.label }));
+		const [selected] = await postAndWaitForSelection(
+			`Found ${comments.length} unresolved review comment(s) on ${pr.platform === 'github' ? 'PR' : 'MR'} #${pr.number} for *${ticketKey}*:`,
+			slackOptions,
+		);
+		choice = selected;
+	} else {
+		for (let i = 0; i < options.length; i++) {
+			console.log(chalk.cyan(`  ${i + 1}. ${options[i].label}`));
+		}
+		const answer = await askLine(chalk.cyan('  Choose (1-2): '));
+		const num = parseInt(answer, 10);
+		if (num === 2) choice = 'ignore';
+	}
+
+	if (choice === 'ignore') {
+		console.log(chalk.gray('  Ignoring review comments. Proceeding normally.'));
+		return noReview;
+	}
+
+	console.log(chalk.green(`  Creating todos from ${comments.length} review comment(s)...`));
+	await writeTodosFromReviewComments(effectivePath, ticketKey, title, comments);
+	await notifySlackStatus(`Addressing ${comments.length} review comment(s) on ${pr.platform === 'github' ? 'PR' : 'MR'} #${pr.number} for ${ticketKey}.`);
+
+	const promptComments: ReviewCommentForPrompt[] = comments.map((c) => ({
+		path: c.path,
+		line: c.line,
+		body: c.body,
+		author: c.author,
+	}));
+
+	return { reviewMode: true, reviewComments: promptComments };
 }
 
 async function cleanupTodoFiles(repoPath: string): Promise<void> {
@@ -518,7 +625,13 @@ export async function launchAgentForRepos(
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
 			const effectivePath = await prepareRepoForWork(repoPath, detail.key);
 
-			const { resumeMode } = await handleCheckpointResume(effectivePath, detail.key);
+			const ticketTitle = String(detail.fields.summary ?? detail.key);
+			const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
+
+			let resumeMode = false;
+			if (!reviewMode) {
+				({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
+			}
 
 			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
 			if (contributing) {
@@ -534,7 +647,7 @@ export async function launchAgentForRepos(
 
 			for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
 				const isResume = resumeMode && qaRound === 0;
-				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume);
+				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : []);
 
 				await saveCheckpoint(detail.key, {
 					ticketKey: detail.key,
@@ -643,7 +756,13 @@ export async function launchMultipleTickets(
 					const effectivePath = await prepareRepoForWork(repoPath, detail.key, useWorktree);
 					if (useWorktree) worktreePaths.push(effectivePath);
 
-					const { resumeMode } = await handleCheckpointResume(effectivePath, detail.key);
+					const ticketTitle = String(detail.fields.summary ?? detail.key);
+					const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
+
+					let resumeMode = false;
+					if (!reviewMode) {
+						({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
+					}
 
 					const contributing =
 						repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
@@ -655,7 +774,7 @@ export async function launchMultipleTickets(
 
 					for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
 						const isResume = resumeMode && qaRound === 0;
-						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume);
+						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : []);
 
 						await saveCheckpoint(detail.key, {
 							ticketKey: detail.key,

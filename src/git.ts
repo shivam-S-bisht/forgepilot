@@ -328,6 +328,207 @@ async function detectGitPlatform(repoPath: string): Promise<'github' | 'gitlab' 
 	return 'unknown';
 }
 
+// ---------------------------------------------------------------------------
+// PR/MR review comment types and helpers
+// ---------------------------------------------------------------------------
+
+export type ReviewComment = {
+	id: number;
+	path: string;
+	line: number | null;
+	body: string;
+	author: string;
+	url: string;
+};
+
+export type OpenPR = {
+	number: number;
+	url: string;
+	title: string;
+	platform: 'github' | 'gitlab';
+};
+
+type CachedPR = {
+	number: number;
+	url: string;
+	platform: 'github' | 'gitlab';
+};
+
+function prCacheKey(ticketKey: string): string {
+	return `pr-${ticketKey.toUpperCase()}`;
+}
+
+export async function findOpenPullRequest(repoPath: string, ticketKey: string): Promise<OpenPR | null> {
+	const cached = await getCached<CachedPR>(prCacheKey(ticketKey));
+	const platform = await detectGitPlatform(repoPath);
+	const branchName = ticketKey.toUpperCase();
+
+	if (platform === 'github') {
+		const token = process.env.FORGEPILOT_GITHUB_TOKEN?.trim();
+		if (!token) return null;
+
+		try {
+			const repoId = await parseRepoIdentifier(repoPath);
+			const url = new URL(`https://api.github.com/repos/${repoId.owner}/${repoId.repo}/pulls`);
+			url.searchParams.set('head', `${repoId.owner}:${branchName}`);
+			url.searchParams.set('state', 'open');
+
+			const response = await fetch(url, {
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: 'application/vnd.github+json',
+				},
+			});
+			if (!response.ok) return null;
+
+			const pulls = (await response.json()) as Array<{ number: number; html_url: string; title: string }>;
+			if (pulls.length > 0) {
+				return { number: pulls[0].number, url: pulls[0].html_url, title: pulls[0].title, platform: 'github' };
+			}
+		} catch {
+			// API call failed; fall through.
+		}
+		return null;
+	}
+
+	if (platform === 'gitlab') {
+		const token = process.env.FORGEPILOT_GITLAB_TOKEN?.trim();
+		if (!token) return null;
+
+		try {
+			const repoId = await parseRepoIdentifier(repoPath);
+			const projectPath = encodeURIComponent(`${repoId.owner}/${repoId.repo}`);
+			const apiBase = `https://${repoId.host}/api/v4`;
+			const url = new URL(`${apiBase}/projects/${projectPath}/merge_requests`);
+			url.searchParams.set('source_branch', branchName);
+			url.searchParams.set('state', 'opened');
+
+			const response = await fetch(url, {
+				headers: { 'PRIVATE-TOKEN': token },
+			});
+			if (!response.ok) return null;
+
+			const mrs = (await response.json()) as Array<{ iid: number; web_url: string; title: string }>;
+			if (mrs.length > 0) {
+				return { number: mrs[0].iid, url: mrs[0].web_url, title: mrs[0].title, platform: 'gitlab' };
+			}
+		} catch {
+			// API call failed; fall through.
+		}
+		return null;
+	}
+
+	if (cached) {
+		return { number: cached.number, url: cached.url, title: '', platform: cached.platform };
+	}
+
+	return null;
+}
+
+export async function fetchUnresolvedReviewComments(
+	repoPath: string,
+	pr: OpenPR,
+): Promise<ReviewComment[]> {
+	if (pr.platform === 'github') {
+		const token = process.env.FORGEPILOT_GITHUB_TOKEN?.trim();
+		if (!token) return [];
+
+		try {
+			const repoId = await parseRepoIdentifier(repoPath);
+			const response = await fetch(
+				`https://api.github.com/repos/${repoId.owner}/${repoId.repo}/pulls/${pr.number}/comments`,
+				{
+					headers: {
+						Authorization: `Bearer ${token}`,
+						Accept: 'application/vnd.github+json',
+					},
+				},
+			);
+			if (!response.ok) return [];
+
+			type GHComment = {
+				id: number;
+				path?: string;
+				line?: number | null;
+				original_line?: number | null;
+				body?: string;
+				user?: { login?: string };
+				html_url?: string;
+				in_reply_to_id?: number;
+			};
+			const comments = (await response.json()) as GHComment[];
+
+			const replyIds = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
+			const topLevel = comments.filter((c) => !c.in_reply_to_id);
+			const unreplied = topLevel.filter((c) => !replyIds.has(c.id));
+
+			return unreplied.map((c) => ({
+				id: c.id,
+				path: c.path ?? '',
+				line: c.line ?? c.original_line ?? null,
+				body: (c.body ?? '').trim(),
+				author: c.user?.login ?? 'unknown',
+				url: c.html_url ?? '',
+			})).filter((c) => c.body.length > 0);
+		} catch {
+			return [];
+		}
+	}
+
+	if (pr.platform === 'gitlab') {
+		const token = process.env.FORGEPILOT_GITLAB_TOKEN?.trim();
+		if (!token) return [];
+
+		try {
+			const repoId = await parseRepoIdentifier(repoPath);
+			const projectPath = encodeURIComponent(`${repoId.owner}/${repoId.repo}`);
+			const apiBase = `https://${repoId.host}/api/v4`;
+			const response = await fetch(
+				`${apiBase}/projects/${projectPath}/merge_requests/${pr.number}/discussions`,
+				{
+					headers: { 'PRIVATE-TOKEN': token },
+				},
+			);
+			if (!response.ok) return [];
+
+			type GLNote = {
+				id: number;
+				body?: string;
+				author?: { username?: string };
+				resolvable?: boolean;
+				resolved?: boolean;
+				position?: { new_path?: string; new_line?: number | null };
+			};
+			type GLDiscussion = {
+				notes?: GLNote[];
+			};
+			const discussions = (await response.json()) as GLDiscussion[];
+
+			const results: ReviewComment[] = [];
+			for (const disc of discussions) {
+				const firstNote = disc.notes?.[0];
+				if (!firstNote) continue;
+				if (firstNote.resolvable !== true) continue;
+				if (firstNote.resolved === true) continue;
+
+				results.push({
+					id: firstNote.id,
+					path: firstNote.position?.new_path ?? '',
+					line: firstNote.position?.new_line ?? null,
+					body: (firstNote.body ?? '').trim(),
+					author: firstNote.author?.username ?? 'unknown',
+					url: '',
+				});
+			}
+			return results.filter((c) => c.body.length > 0);
+		} catch {
+			return [];
+		}
+	}
+
+	return [];
+}
+
 export async function pushBranchAndCreateMR(
 	repoPath: string,
 	ticketKey: string,
@@ -364,6 +565,8 @@ export async function pushBranchAndCreateMR(
 				{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024 },
 			);
 			const prUrl = result.stdout.trim();
+			const prNum = parseInt(prUrl.split('/').pop() ?? '', 10);
+			if (prNum) await setCached(prCacheKey(ticketKey), { number: prNum, url: prUrl, platform: 'github' });
 			console.log(chalk.green(`  PR created: ${prUrl}`));
 			return prUrl;
 		} catch (err: unknown) {
@@ -375,6 +578,8 @@ export async function pushBranchAndCreateMR(
 		try {
 			const repoId = await parseRepoIdentifier(repoPath);
 			const prUrl = await createGitHubPR(repoId, branchName, baseBranch, mrTitle, mrBody);
+			const prNum = parseInt(prUrl.split('/').pop() ?? '', 10);
+			if (prNum) await setCached(prCacheKey(ticketKey), { number: prNum, url: prUrl, platform: 'github' });
 			console.log(chalk.green(`  PR created via API: ${prUrl}`));
 			return prUrl;
 		} catch (apiErr: unknown) {
@@ -399,6 +604,8 @@ export async function pushBranchAndCreateMR(
 				{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024 },
 			);
 			const mrUrl = result.stdout.trim();
+			const mrNum = parseInt(mrUrl.split('/').pop() ?? '', 10);
+			if (mrNum) await setCached(prCacheKey(ticketKey), { number: mrNum, url: mrUrl, platform: 'gitlab' });
 			console.log(chalk.green(`  MR created: ${mrUrl}`));
 			return mrUrl;
 		} catch (err: unknown) {
@@ -410,6 +617,8 @@ export async function pushBranchAndCreateMR(
 		try {
 			const repoId = await parseRepoIdentifier(repoPath);
 			const mrUrl = await createGitLabMR(repoId, branchName, baseBranch, mrTitle, mrBody);
+			const mrNum = parseInt(mrUrl.split('/').pop() ?? '', 10);
+			if (mrNum) await setCached(prCacheKey(ticketKey), { number: mrNum, url: mrUrl, platform: 'gitlab' });
 			console.log(chalk.green(`  MR created via API: ${mrUrl}`));
 			return mrUrl;
 		} catch (apiErr: unknown) {

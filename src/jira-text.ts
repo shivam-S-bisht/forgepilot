@@ -181,6 +181,13 @@ export function getJiraBrowseUrl(detail: JiraIssueDetail): string {
 	return base ? `${base}/browse/${detail.key}` : `https://clubautomation.atlassian.net/browse/${detail.key}`;
 }
 
+export type ReviewCommentForPrompt = {
+	path: string;
+	line: number | null;
+	body: string;
+	author: string;
+};
+
 export function buildWorkPrompt(
 	detail: JiraIssueDetail,
 	contributing = '',
@@ -189,6 +196,7 @@ export function buildWorkPrompt(
 	figmaSection = '',
 	priorAnswers = '',
 	resumeFromCheckpoint = false,
+	reviewComments: ReviewCommentForPrompt[] = [],
 ): string {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
@@ -340,6 +348,26 @@ export function buildWorkPrompt(
 			'- If an answer makes an item unnecessary, REMOVE it or mark it as skipped with a note.',
 			'- Do NOT modify already-checked items.',
 			`Then continue implementing from the first unchecked item in ${todoFile}.`,
+			'',
+		);
+	}
+
+	if (reviewComments.length > 0) {
+		const commentLines = reviewComments.map((c, i) => {
+			const location = c.line ? `${c.path}:${c.line}` : c.path || 'general';
+			return `${i + 1}. [${location}] @${c.author}: "${c.body}"`;
+		});
+		sections.push(
+			'=== MR/PR REVIEW FEEDBACK ===',
+			'Your previous work has been reviewed. Address the following unresolved review comments:',
+			'',
+			...commentLines,
+			'',
+			`Your todo file (${todoFile}) has been pre-populated with tasks derived from these comments.`,
+			'Work through each item, commit after each fix, and ensure all review feedback is addressed.',
+			`Do NOT recreate ${todoFile} — it already contains the review items.`,
+			'Skip steps 1-3 of the WORKFLOW (UNDERSTAND, EXPLORE, PLAN) and go directly to step 5 (IMPLEMENT).',
+			'=== END REVIEW FEEDBACK ===',
 			'',
 		);
 	}

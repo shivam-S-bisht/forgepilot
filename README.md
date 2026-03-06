@@ -288,6 +288,19 @@ If the agent is interrupted (crash, Ctrl+C, timeout), the todo file and checkpoi
 
 Checkpoint metadata (agent used, timestamp, repo path) is stored in `.cache/checkpoint-<TICKET_KEY>.json`. The resume prompt is shown via Slack when the Slack flow is active, or in the terminal otherwise.
 
+### MR/PR Review Comments
+
+When a ticket is re-assigned after code review, ForgePilot automatically detects open MR/PRs for the ticket branch and fetches unresolved review comments via the GitHub or GitLab API.
+
+If unresolved comments are found, ForgePilot offers two options:
+
+1. **Address review comments** — creates a todo list from the review feedback and launches the agent with a review-mode prompt that includes the comments and instructs it to work through them
+2. **Ignore** — skip review comments and proceed with the normal checkpoint/fresh flow
+
+The agent receives the full review context (file path, line number, author, comment body) and a pre-populated `.forgepilot-todos-<TICKET_KEY>.md` with one item per review comment. After addressing all comments, the updated code can be pushed to the same branch to update the MR/PR.
+
+This requires `FORGEPILOT_GITHUB_TOKEN` or `FORGEPILOT_GITLAB_TOKEN` to be set (same tokens used for PR/MR creation).
+
 ## MCP Server
 
 ForgePilot includes an MCP (Model Context Protocol) server that exposes all its capabilities as tools for AI agents like Cursor, Claude Desktop, Copilot, and others.
