@@ -249,6 +249,8 @@ export function buildWorkPrompt(
 		`   - Is there an existing validation utility I should reuse?`,
 		'',
 		'   ForgePilot will route your questions to the user and re-launch you with answers.',
+		`   When re-launched with answers, review and update ${todoFile} — add, modify, or remove`,
+		'   unchecked items based on the answers before continuing implementation.',
 		`   If you have no questions, skip this step and continue.`,
 		'',
 		`5. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
@@ -332,7 +334,12 @@ export function buildWorkPrompt(
 			priorAnswers,
 			'',
 			'=== END ANSWERS ===',
-			`Continue working from where you left off. Check ${todoFile} for progress.`,
+			`Based on these answers, review your todo list in ${todoFile}:`,
+			'- If an answer changes the scope or approach, UPDATE existing unchecked items accordingly.',
+			'- If an answer reveals new work, ADD new unchecked items to the list.',
+			'- If an answer makes an item unnecessary, REMOVE it or mark it as skipped with a note.',
+			'- Do NOT modify already-checked items.',
+			`Then continue implementing from the first unchecked item in ${todoFile}.`,
 			'',
 		);
 	}
