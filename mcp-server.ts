@@ -11,6 +11,7 @@ import { fetchBoards, fetchIssueDetail, fetchTicketsByJql, fetchTicketsByScope, 
 import type { TicketScope } from './src/jira.js';
 import { buildWorkPrompt, getAcceptanceCriteria, getDescriptionText, getJiraBrowseUrl, linkedIssuesText, commentsText } from './src/jira-text.js';
 import { extractRepoLabels, getRemoteUrls, scanLocalRepos } from './src/repo.js';
+import { askQuestionViaSlack, shouldUseSlackQa } from './src/slack.js';
 
 activateAxonVenv();
 
@@ -537,6 +538,39 @@ server.tool(
 			content: [{
 				type: 'text',
 				text: JSON.stringify(result, null, 2),
+			}],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Q&A
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'ask_question',
+	'Ask the user a question and wait for their answer. Routes to Slack if FORGEPILOT_SLACK_QA is enabled, otherwise returns an error asking the caller to include the question in its output. Use this when you encounter ambiguity or need clarification during work.',
+	{
+		question: z.string().describe('The question to ask the user'),
+		ticket_key: z.string().optional().describe('Jira ticket key for context (e.g. CE-1234)'),
+	},
+	async ({ question, ticket_key }) => {
+		const ticketKey = ticket_key ?? 'UNKNOWN';
+
+		if (shouldUseSlackQa()) {
+			const answer = await askQuestionViaSlack(question, ticketKey, 1, 1);
+			return {
+				content: [{
+					type: 'text',
+					text: answer ? `User answered: ${answer}` : 'User skipped this question. Use your best judgment.',
+				}],
+			};
+		}
+
+		return {
+			content: [{
+				type: 'text',
+				text: `Slack Q&A is not enabled. Please include this question in your response so the user can answer it directly: "${question}"`,
 			}],
 		};
 	},

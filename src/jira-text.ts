@@ -187,6 +187,7 @@ export function buildWorkPrompt(
 	clarifications = '',
 	axonHint = '',
 	figmaSection = '',
+	priorAnswers = '',
 ): string {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
@@ -214,6 +215,8 @@ export function buildWorkPrompt(
 	);
 
 	const todoFile = `.forgepilot-todos-${detail.key}.md`;
+	const questionsFile = `.forgepilot-questions-${detail.key}.md`;
+	const answersFile = `.forgepilot-answers-${detail.key}.md`;
 
 	sections.push(
 		'=== WORKFLOW ===',
@@ -221,6 +224,7 @@ export function buildWorkPrompt(
 		'',
 		'1. UNDERSTAND — Read the full ticket context below before writing any code.',
 		'   Identify what is being asked, the scope of changes, and the acceptance criteria.',
+		`   If ${answersFile} exists, read it first — it contains answers to your prior questions.`,
 		'',
 		'2. EXPLORE — Examine the existing codebase: file structure, naming conventions,',
 		'   patterns, imports, and how similar features are implemented.',
@@ -236,19 +240,29 @@ export function buildWorkPrompt(
 		'',
 		'   Break the work into small, logical units. Each item should be independently committable.',
 		'',
-		`4. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
+		`4. ASK — If you have questions, ambiguities, or blockers that prevent you from continuing,`,
+		`   write them to ${questionsFile} (one question per line, prefixed with "- ") and then STOP.`,
+		'   Do NOT guess or make assumptions on critical decisions. Example:',
+		'',
+		`   - Should the video URL field accept YouTube links only or any URL?`,
+		`   - Is there an existing validation utility I should reuse?`,
+		'',
+		'   ForgePilot will route your questions to the user and re-launch you with answers.',
+		`   If you have no questions, skip this step and continue.`,
+		'',
+		`5. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
 		'   a. Complete the task.',
 		`   b. Mark it done in ${todoFile} by changing "- [ ]" to "- [x]".`,
-		`   c. Commit the code changes (do NOT include ${todoFile} in the commit).`,
+		`   c. Commit the code changes (do NOT include ${todoFile}, ${questionsFile}, or ${answersFile} in the commit).`,
 		`      Use commit message format: ${detail.key} <concise description of what was done>`,
 		'   d. Move to the next item.',
 		'',
-		'5. VERIFY — After all items are done, run linters, type checks, and tests if the repo has them.',
+		'6. VERIFY — After all items are done, run linters, type checks, and tests if the repo has them.',
 		'   Fix any errors you introduced. Ensure the build passes.',
 		'',
-		`6. CLEANUP — Delete the ${todoFile} file. Do NOT commit it.`,
+		`7. CLEANUP — Delete ${todoFile}, ${questionsFile}, and ${answersFile} if they exist. Do NOT commit them.`,
 		'',
-		'7. REVIEW — Self-review your changes against the acceptance criteria.',
+		'8. REVIEW — Self-review your changes against the acceptance criteria.',
 		'   Confirm every AC item is addressed. If something is unclear, add a TODO comment.',
 		'',
 	);
@@ -274,7 +288,7 @@ export function buildWorkPrompt(
 
 	sections.push(
 		'=== CONSTRAINTS ===',
-		`- Commit after completing each todo item. Use the format: ${detail.key} <concise description>. Do NOT include ${todoFile} in any commit. Do NOT push to remote.`,
+		`- Commit after completing each todo item. Use the format: ${detail.key} <concise description>. Do NOT include ${todoFile}, ${questionsFile}, or ${answersFile} in any commit. Do NOT push to remote.`,
 		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
 		'- Prefer editing existing files over creating new ones.',
@@ -307,6 +321,19 @@ export function buildWorkPrompt(
 
 	if (clarifications) {
 		sections.push(clarifications, '');
+	}
+
+	if (priorAnswers) {
+		sections.push(
+			'=== ANSWERS TO YOUR PRIOR QUESTIONS ===',
+			'You previously asked questions and stopped. Here are the answers:',
+			'',
+			priorAnswers,
+			'',
+			'=== END ANSWERS ===',
+			`Continue working from where you left off. Check ${todoFile} for progress.`,
+			'',
+		);
 	}
 
 	return sections.join('\n');

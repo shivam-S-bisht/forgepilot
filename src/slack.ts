@@ -166,6 +166,53 @@ export async function askConcernViaSlack(
 	throw new Error(`Timed out waiting for Slack response for concern "${concern.id}".`);
 }
 
+export async function askQuestionViaSlack(
+	question: string,
+	ticketKey: string,
+	index: number,
+	total: number,
+): Promise<string | null> {
+	if (!isSlackQaEnabled()) return null;
+
+	const channel = getRequiredEnv('FORGEPILOT_SLACK_CHANNEL_ID');
+	const expectedUserId = process.env.FORGEPILOT_SLACK_EXPECTED_USER_ID?.trim();
+	const pollIntervalMs = Number(process.env.FORGEPILOT_SLACK_POLL_INTERVAL_MS ?? '5000');
+	const timeoutMs = Number(process.env.FORGEPILOT_SLACK_ANSWER_TIMEOUT_MS ?? `${10 * 60 * 1000}`);
+
+	const lines = [
+		':robot_face: *ForgePilot — Agent Question*',
+		`*Question ${index}/${total}* for *${ticketKey}*`,
+		'',
+		question,
+		'',
+		'---',
+		'*Reply in this thread* with your answer.',
+		'Reply `skip` to skip this question.',
+		...(expectedUserId ? [`Only replies from <@${expectedUserId}> will be accepted.`] : []),
+	];
+
+	const questionText = lines.join('\n');
+	const questionTs = await postMessage(channel, questionText);
+	await postWebhookNotification(`Agent asked question ${index}/${total} for ${ticketKey}.`);
+
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const replies = await fetchThreadReplies(channel, questionTs);
+		if (!replies.ok) {
+			throw new Error(`Slack conversations.replies failed: ${replies.error ?? 'unknown error'}`);
+		}
+		const answer = extractUserAnswer(replies, questionTs, expectedUserId);
+		if (answer) {
+			const normalized = answer.trim().toLowerCase();
+			if (normalized === 'skip') return '';
+			return answer.trim();
+		}
+		await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+	}
+
+	throw new Error(`Timed out waiting for Slack response for agent question on ${ticketKey}.`);
+}
+
 export function shouldUseSlackQa(): boolean {
 	return isSlackQaEnabled();
 }

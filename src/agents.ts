@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from './axon.js';
@@ -10,7 +12,7 @@ import { transitionIssueToInProgress } from './jira.js';
 import { buildWorkPrompt, getJiraBrowseUrl } from './jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
-import { notifySlackStatus } from './slack.js';
+import { askQuestionViaSlack, notifySlackStatus, shouldUseSlackQa } from './slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -26,6 +28,101 @@ async function cleanupTodoFiles(repoPath: string): Promise<void> {
 		}
 	} catch {
 		// Non-critical — ignore cleanup failures.
+	}
+}
+
+function questionsFilePath(repoPath: string, ticketKey: string): string {
+	return path.join(repoPath, `.forgepilot-questions-${ticketKey.toUpperCase()}.md`);
+}
+
+function answersFilePath(repoPath: string, ticketKey: string): string {
+	return path.join(repoPath, `.forgepilot-answers-${ticketKey.toUpperCase()}.md`);
+}
+
+function askLine(prompt: string): Promise<string> {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	return new Promise((resolve) =>
+		rl.question(prompt, (answer) => {
+			rl.close();
+			resolve(answer.trim());
+		}),
+	);
+}
+
+async function readQuestionsFile(repoPath: string, ticketKey: string): Promise<string[] | null> {
+	const filePath = questionsFilePath(repoPath, ticketKey);
+	if (!existsSync(filePath)) return null;
+	try {
+		const content = await fs.readFile(filePath, 'utf8');
+		const questions = content
+			.split('\n')
+			.map((line) => line.replace(/^-\s*/, '').trim())
+			.filter(Boolean);
+		return questions.length > 0 ? questions : null;
+	} catch {
+		return null;
+	}
+}
+
+async function writeAnswersFile(
+	repoPath: string,
+	ticketKey: string,
+	qaPairs: Array<{ question: string; answer: string }>,
+): Promise<void> {
+	const filePath = answersFilePath(repoPath, ticketKey);
+	const lines = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`);
+	await fs.writeFile(filePath, lines.join('\n\n') + '\n', 'utf8');
+}
+
+async function routeQuestions(
+	questions: string[],
+	ticketKey: string,
+): Promise<Array<{ question: string; answer: string }>> {
+	const results: Array<{ question: string; answer: string }> = [];
+
+	console.log(chalk.bold.cyan(`\n  Agent has ${questions.length} question(s) for ${ticketKey}:\n`));
+
+	for (let i = 0; i < questions.length; i++) {
+		const question = questions[i];
+		console.log(chalk.cyan(`  [${i + 1}/${questions.length}] ${question}`));
+
+		let answer = '';
+		if (shouldUseSlackQa()) {
+			const slackAnswer = await askQuestionViaSlack(question, ticketKey, i + 1, questions.length);
+			answer = slackAnswer ?? '';
+		} else {
+			if (process.stdin.isTTY) process.stdin.setRawMode(false);
+			answer = await askLine(chalk.cyan('    Your answer (press Enter to skip): '));
+			if (process.stdin.isTTY) process.stdin.setRawMode(true);
+		}
+
+		if (answer) {
+			console.log(chalk.green(`    ✓ Noted.\n`));
+		} else {
+			answer = 'No answer provided — use your best judgment.';
+			console.log(chalk.gray(`    ↳ Skipped.\n`));
+		}
+
+		results.push({ question, answer });
+	}
+
+	return results;
+}
+
+async function cleanupQuestionFiles(repoPath: string): Promise<void> {
+	try {
+		const entries = await fs.readdir(repoPath);
+		for (const entry of entries) {
+			if (
+				(entry.startsWith('.forgepilot-questions-') || entry.startsWith('.forgepilot-answers-')) &&
+				entry.endsWith('.md')
+			) {
+				await fs.unlink(path.join(repoPath, entry));
+				console.log(chalk.gray(`  Cleaned up ${entry}`));
+			}
+		}
+	} catch {
+		// Non-critical.
 	}
 }
 
@@ -276,10 +373,29 @@ export async function launchAgentForRepos(
 			logAxonStatus(effectivePath);
 			axonChild = startAxonWatch(effectivePath);
 
-			const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
-			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ...`));
-			await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+			let priorAnswers = '';
+			const maxQaRounds = 5;
+
+			for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
+				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers);
+				console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ...`));
+				await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+
+				const questions = await readQuestionsFile(effectivePath, detail.key);
+				if (!questions) break;
+
+				console.log(chalk.yellow(`\n  Agent paused with ${questions.length} question(s). Routing for answers...`));
+				const qaPairs = await routeQuestions(questions, detail.key);
+				await writeAnswersFile(effectivePath, detail.key, qaPairs);
+
+				const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
+				priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+
+				await notifySlackStatus(`ForgePilot re-launching ${agentOption.label} for ${detail.key} after answering ${questions.length} question(s).`);
+			}
+
 			await cleanupTodoFiles(effectivePath);
+			await cleanupQuestionFiles(effectivePath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await notifySlackStatus(
@@ -362,9 +478,25 @@ export async function launchMultipleTickets(
 					const axonHint = getAxonPromptHint(effectivePath);
 					axonChild = startAxonWatch(effectivePath);
 
-					const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection);
-					await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+					let priorAnswers = '';
+					const maxQaRounds = 5;
+
+					for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
+						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers);
+						await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+
+						const questions = await readQuestionsFile(effectivePath, detail.key);
+						if (!questions) break;
+
+						const qaPairs = await routeQuestions(questions, detail.key);
+						await writeAnswersFile(effectivePath, detail.key, qaPairs);
+
+						const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
+						priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+					}
+
 					await cleanupTodoFiles(effectivePath);
+					await cleanupQuestionFiles(effectivePath);
 				} finally {
 					stopAxonWatch(axonChild);
 				}
