@@ -329,6 +329,10 @@ ForgePilot includes an MCP (Model Context Protocol) server that exposes all its 
 | `cache_list` | List all cached keys and values |
 | `cache_clear` | Clear the entire cache |
 | `work_on_ticket` | All-in-one: resolve repos, prepare branches, build prompt, transition ticket |
+| `get_todo_progress` | Read and parse the todo checklist for a ticket (completed/pending items) |
+| `get_checkpoint` | Load checkpoint metadata for a ticket (agent, timestamps, repo path) |
+| `clear_checkpoint` | Discard checkpoint and optionally the todo file for a ticket |
+| `get_review_comments` | Find open PR/MR and fetch unresolved review comments for a ticket |
 
 ### Setup for Cursor
 

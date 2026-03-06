@@ -4,9 +4,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { activateAxonVenv, getAxonPromptHint, startAxonWatch } from './src/axon.js';
-import { clearCache, getAllCache, getCached, setCached } from './src/cache.js';
+import { parseTodoProgress } from './src/agents.js';
+import { clearCache, clearCached, getAllCache, getCached, setCached } from './src/cache.js';
 import { fetchFigmaDesignContext } from './src/figma.js';
-import { gitExec, prepareRepoForWork, pushBranchAndCreateMR, readContributing } from './src/git.js';
+import { fetchUnresolvedReviewComments, findOpenPullRequest, gitExec, prepareRepoForWork, pushBranchAndCreateMR, readContributing } from './src/git.js';
 import { fetchBoards, fetchIssueDetail, fetchTicketsByJql, fetchTicketsByScope, transitionIssueToInProgress } from './src/jira.js';
 import type { TicketScope } from './src/jira.js';
 import { buildWorkPrompt, getAcceptanceCriteria, getDescriptionText, getJiraBrowseUrl, linkedIssuesText, commentsText } from './src/jira-text.js';
@@ -571,6 +572,124 @@ server.tool(
 			content: [{
 				type: 'text',
 				text: `Slack Q&A is not enabled. Please include this question in your response so the user can answer it directly: "${question}"`,
+			}],
+		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Checkpoint & Todo Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'get_todo_progress',
+	'Read and parse the .forgepilot-todos-<KEY>.md file from a repo. Returns completed/pending item counts and descriptions. Use this to check how far an agent got on a ticket.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository (or worktree)'),
+		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
+	},
+	async ({ repo_path, ticket_key }) => {
+		const progress = await parseTodoProgress(repo_path, ticket_key);
+		if (!progress) {
+			return {
+				content: [{ type: 'text', text: `No todo file found for ${ticket_key} in ${repo_path}.` }],
+			};
+		}
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(progress, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'get_checkpoint',
+	'Load checkpoint metadata for a ticket. Returns the agent used, timestamps, and repo path from the last interrupted run. Returns null if no checkpoint exists.',
+	{
+		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
+	},
+	async ({ ticket_key }) => {
+		const checkpoint = await getCached(`checkpoint-${ticket_key.toUpperCase()}`);
+		if (!checkpoint) {
+			return {
+				content: [{ type: 'text', text: `No checkpoint found for ${ticket_key}.` }],
+			};
+		}
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify(checkpoint, null, 2),
+			}],
+		};
+	},
+);
+
+server.tool(
+	'clear_checkpoint',
+	'Discard checkpoint metadata and optionally the todo file for a ticket. Use this to reset state before starting fresh.',
+	{
+		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
+		repo_path: z.string().optional().describe('If provided, also deletes the .forgepilot-todos-<KEY>.md file from this path'),
+	},
+	async ({ ticket_key, repo_path }) => {
+		await clearCached(`checkpoint-${ticket_key.toUpperCase()}`);
+		const messages = [`Checkpoint cleared for ${ticket_key}.`];
+
+		if (repo_path) {
+			const { existsSync } = await import('node:fs');
+			const { unlink } = await import('node:fs/promises');
+			const { join } = await import('node:path');
+			const todoFile = join(repo_path, `.forgepilot-todos-${ticket_key.toUpperCase()}.md`);
+			if (existsSync(todoFile)) {
+				await unlink(todoFile);
+				messages.push(`Todo file deleted: ${todoFile}`);
+			}
+		}
+
+		return {
+			content: [{ type: 'text', text: messages.join('\n') }],
+		};
+	},
+);
+
+server.tool(
+	'get_review_comments',
+	'Find an open PR/MR for a ticket branch and fetch unresolved review comments. Requires FORGEPILOT_GITHUB_TOKEN or FORGEPILOT_GITLAB_TOKEN. Returns the PR/MR info and comment details.',
+	{
+		repo_path: z.string().describe('Absolute path to the git repository'),
+		ticket_key: z.string().describe('Jira ticket key (branch name, e.g. "CE-1234")'),
+	},
+	async ({ repo_path, ticket_key }) => {
+		const pr = await findOpenPullRequest(repo_path, ticket_key);
+		if (!pr) {
+			return {
+				content: [{ type: 'text', text: `No open PR/MR found for branch ${ticket_key.toUpperCase()}.` }],
+			};
+		}
+
+		const comments = await fetchUnresolvedReviewComments(repo_path, pr);
+		return {
+			content: [{
+				type: 'text',
+				text: JSON.stringify({
+					pullRequest: {
+						number: pr.number,
+						url: pr.url,
+						title: pr.title,
+						platform: pr.platform,
+					},
+					unresolvedComments: comments.map((c) => ({
+						id: c.id,
+						path: c.path,
+						line: c.line,
+						body: c.body,
+						author: c.author,
+						url: c.url,
+					})),
+					totalUnresolved: comments.length,
+				}, null, 2),
 			}],
 		};
 	},

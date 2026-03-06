@@ -35,7 +35,7 @@ type CheckpointState = {
 	lastUpdatedAt: string;
 };
 
-type TodoProgress = {
+export type TodoProgress = {
 	total: number;
 	completed: number;
 	pending: string[];
@@ -62,7 +62,7 @@ async function clearCheckpoint(ticketKey: string): Promise<void> {
 	await clearCached(checkpointCacheKey(ticketKey));
 }
 
-async function parseTodoProgress(repoPath: string, ticketKey: string): Promise<TodoProgress | null> {
+export async function parseTodoProgress(repoPath: string, ticketKey: string): Promise<TodoProgress | null> {
 	const filePath = todoFilePath(repoPath, ticketKey);
 	if (!existsSync(filePath)) return null;
 	try {
