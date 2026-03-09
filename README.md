@@ -69,6 +69,195 @@ flowchart TD
     PushBranch --> CreatePR
 ```
 
+## Getting Started (New System Setup)
+
+Follow these steps to install and configure ForgePilot from scratch on a new machine.
+
+### Step 1 — Prerequisites
+
+- **macOS** (voice mode requires macOS `say` for TTS)
+- **Node.js 20+**
+- **Git**
+- **Homebrew** — <https://brew.sh>
+
+### Step 2 — Install ForgePilot
+
+**Option A — Global install via GitHub Packages (recommended):**
+
+Add to `~/.npmrc`:
+
+```ini
+@shivam-s-bisht:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=ghp_your_read_token
+```
+
+Then install globally:
+
+```bash
+npm i -g @shivam-s-bisht/forgepilot
+```
+
+**Option B — From source:**
+
+```bash
+git clone <repo-url> ~/dev/repo-agent-cli
+cd ~/dev/repo-agent-cli
+npm install
+npm run build
+npm link
+```
+
+### Step 3 — Configure Jira (Required)
+
+Add these to your `~/.zshrc` (or `~/.bashrc`):
+
+```bash
+export FORGEPILOT_JIRA_BASE_URL="https://yourcompany.atlassian.net"
+export FORGEPILOT_JIRA_EMAIL="you@company.com"
+export FORGEPILOT_JIRA_API_TOKEN="ATATT3x..."   # https://id.atlassian.com/manage-profile/security/api-tokens
+export FORGEPILOT_ROOT_DIR="~/dev"               # root directory where your repos live
+```
+
+Reload your shell (`source ~/.zshrc`) after adding these.
+
+### Step 4 — Install an AI Agent CLI
+
+ForgePilot launches external AI agents to do the actual coding work. Install at least one:
+
+| Agent | Install Command |
+|-------|-----------------|
+| GitHub Copilot CLI | `npm i -g @githubnext/github-copilot-cli` |
+| Claude Code | `npm i -g @anthropic-ai/claude-code` |
+| Cursor CLI | Comes with Cursor IDE |
+| Gemini CLI | `npm i -g @google/gemini-cli` |
+| Aider | `pip install aider-chat` |
+| OpenAI Codex | `npm i -g @openai/codex` |
+
+ForgePilot auto-detects which are installed and only shows available options. See [Supported AI Agents](#supported-ai-agents) for the full list of agent IDs.
+
+### Step 5 — Set Optional Automation Variables
+
+These are not required but streamline the workflow:
+
+```bash
+# Skip interactive pickers
+export FORGEPILOT_DEFAULT_AGENT="copilot-autonomous"
+export FORGEPILOT_TICKET_SCOPE="current"            # "current" or "all"
+export FORGEPILOT_BASE_BRANCH="development"          # base branch for ticket branches
+export FORGEPILOT_AUTO_PUSH="true"                   # auto-push + create PR after agent finishes
+
+# Git platform tokens (for PR/MR creation without gh/glab CLI)
+export FORGEPILOT_GITHUB_TOKEN="ghp_..."
+export FORGEPILOT_GITLAB_TOKEN="glpat-..."
+
+# Figma design context (optional)
+export FORGEPILOT_FIGMA_PAT="figd_..."
+
+# Slack-driven workflow (optional — see Slack-Driven Workflow section below)
+export FORGEPILOT_SLACK_QA="true"
+export FORGEPILOT_SLACK_BOT_TOKEN="xoxb-..."
+export FORGEPILOT_SLACK_CHANNEL_ID="C0123456789"
+```
+
+See [Environment Variables](#environment-variables) for the complete reference.
+
+### Step 6 — Set Up Voice Mode (Optional)
+
+1. Install `sox` for microphone recording:
+
+```bash
+brew install sox
+```
+
+2. Download the Whisper speech-to-text model (~98 MB):
+
+```bash
+mkdir -p ~/.forgepilot/sherpa-models/whisper-tiny.en
+cd ~/.forgepilot/sherpa-models/whisper-tiny.en
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt
+```
+
+3. Ensure at least one AI agent CLI is installed (from Step 4) — voice mode uses `copilot` or `cursor` for AI-powered command parsing. Set `FORGEPILOT_PREFLIGHT_AGENT=cursor` if you prefer Cursor over Copilot.
+
+Speech recognition runs entirely offline via `sherpa-onnx-node` — no API keys needed. See [Voice Mode](#voice-mode) for full usage details.
+
+### Step 7 — Set Up MCP Server (Optional)
+
+The MCP server exposes ForgePilot as tools for AI editors.
+
+**For Cursor** — add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "forgepilot": {
+      "command": "forgepilot-mcp"
+    }
+  }
+}
+```
+
+**For Claude Desktop** — add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "forgepilot": {
+      "command": "forgepilot-mcp"
+    }
+  }
+}
+```
+
+See [MCP Server](#mcp-server) for the full list of available tools.
+
+### Step 8 — Verify
+
+```bash
+forgepilot              # interactive TUI
+forgepilot --voice      # voice mode (requires Step 6)
+forgepilot-mcp          # MCP server (should start without errors)
+```
+
+### Quick Reference — All Environment Variables
+
+```bash
+# Jira (required)
+export FORGEPILOT_JIRA_BASE_URL="https://yourcompany.atlassian.net"
+export FORGEPILOT_JIRA_EMAIL="you@company.com"
+export FORGEPILOT_JIRA_API_TOKEN="ATATT3x..."
+export FORGEPILOT_ROOT_DIR="~/dev"
+
+# Automation (optional)
+export FORGEPILOT_DEFAULT_AGENT="copilot-autonomous"
+export FORGEPILOT_TICKET_SCOPE="current"
+export FORGEPILOT_BASE_BRANCH="development"
+export FORGEPILOT_AUTO_PUSH="true"
+export FORGEPILOT_AUTO_ALL_TICKETS="false"
+export FORGEPILOT_SKIP_DETAIL="false"
+
+# Git platform tokens (optional)
+export FORGEPILOT_GITHUB_TOKEN="ghp_..."
+export FORGEPILOT_GITLAB_TOKEN="glpat-..."
+
+# Figma (optional)
+export FORGEPILOT_FIGMA_PAT="figd_..."
+
+# Voice (optional)
+export FORGEPILOT_VOICE_TTS="say"
+export FORGEPILOT_PREFLIGHT_AGENT="copilot"
+
+# Slack (optional)
+export FORGEPILOT_SLACK_QA="true"
+export FORGEPILOT_SLACK_BOT_TOKEN="xoxb-..."
+export FORGEPILOT_SLACK_CHANNEL_ID="C0123456789"
+export FORGEPILOT_SLACK_EXPECTED_USER_ID="U0123456789"
+```
+
+---
+
 ## Install
 
 ### System Dependencies (optional)
