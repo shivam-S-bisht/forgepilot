@@ -701,7 +701,7 @@ server.tool(
 
 server.tool(
 	'start_voice_mode',
-	'Start ForgePilot push-to-talk voice mode. Uses sherpa-onnx-node (Whisper) for in-process speech recognition and sox for recording. Press Space to start/stop recording. Only works in a terminal with microphone access.',
+	'Start ForgePilot push-to-talk voice mode with AI-powered natural language understanding. Uses sherpa-onnx-node (Whisper) for in-process speech recognition, sox for recording, and copilot/cursor CLI for AI command parsing. Supports all CLI operations: fetch/search tickets by status or keyword, start work on single or multiple tickets in parallel, commit changes, prepare branches, push and create PRs, and more. Press Space to start/stop recording. Only works in a terminal with microphone access.',
 	{},
 	async () => {
 		const { startVoiceMode } = await import('./src/voice.js');
@@ -709,7 +709,7 @@ server.tool(
 		return {
 			content: [{
 				type: 'text',
-				text: 'Voice mode started. Press Space to start recording, press Space again to stop. Press q to exit.',
+				text: 'Voice mode started. Press Space to start recording, press Space again to stop. Press q to exit. Speak naturally — AI parses your commands.',
 			}],
 		};
 	},

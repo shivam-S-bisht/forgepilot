@@ -11,7 +11,7 @@ flowchart TD
     subgraph entryPoints [Entry Points]
         CLI["forgepilot CLI"]
         MCP["forgepilot-mcp Server"]
-        Voice["forgepilot --voice"]
+        Voice["forgepilot --voice (AI-parsed)"]
     end
 
     subgraph scopeSelection [Scope Selection]
@@ -247,17 +247,17 @@ forgepilot
 
 ### Voice Mode
 
-ForgePilot includes a push-to-talk voice interface that uses macOS built-in speech recognition. Hold a key to talk, release when done.
+ForgePilot includes a fully hands-free push-to-talk voice interface with AI-powered natural language understanding. Speak naturally and ForgePilot figures out what you want — no memorizing exact phrases.
 
 #### Prerequisites
 
-Install `sox` (audio recording):
+1. **sox** (audio recording):
 
 ```bash
 brew install sox
 ```
 
-Download the Whisper tiny.en model for sherpa-onnx (~98 MB total):
+2. **Whisper speech-to-text model** (~98 MB total):
 
 ```bash
 mkdir -p ~/.forgepilot/sherpa-models/whisper-tiny.en
@@ -267,7 +267,11 @@ curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/m
 curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt
 ```
 
-Speech recognition runs entirely in-process via `sherpa-onnx-node` (a Node.js addon wrapping OpenAI's Whisper) -- completely free, no API keys, fully offline. `sox` provides the `rec` command for microphone recording.
+3. **AI agent CLI** (for intelligent command parsing — at least one of):
+   - `copilot` (GitHub Copilot CLI) — **recommended**, used by default
+   - `cursor` (Cursor CLI) — set `FORGEPILOT_PREFLIGHT_AGENT=cursor` to use
+
+Speech recognition runs entirely in-process via `sherpa-onnx-node` (OpenAI Whisper as a Node.js addon) — completely free, no API keys, fully offline. The AI command parser uses the same agent CLI as preflight checks. If no AI CLI is available, voice mode falls back to keyword-based matching.
 
 #### Usage
 
@@ -282,32 +286,70 @@ Push-to-talk controls:
 
 | Key | Action |
 |-----|--------|
-| Press **Space** | Start recording -- speak your command |
-| Press **Space** again | Stop recording -- ForgePilot transcribes and processes your speech |
+| Press **Space** | Start recording — speak your command |
+| Press **Space** again | Stop recording — ForgePilot transcribes, AI parses, and executes |
 | **q** or **Ctrl+C** | Exit voice mode |
 
-#### Supported Voice Commands
+#### What You Can Say
 
-| Say this... | What it does |
-|-------------|-------------|
-| "fetch my tickets" / "show sprint" | List current sprint tickets |
-| "show ticket CE-1234" | Get full ticket details |
-| "start working on CE-1234" | Start ticket workflow |
-| "push and create PR" | Push branch and create MR/PR |
-| "check status" | Show git branch status |
-| "show progress" / "show todos" | Show todo checklist progress |
-| "check review comments" | Fetch unresolved PR/MR comments |
+Voice mode uses AI to understand natural language. You don't need to memorize exact phrases — just speak naturally. Here are examples:
+
+**Ticket Management**
+
+| Say something like... | What it does |
+|----------------------|-------------|
+| "fetch my tickets" / "show my sprint tickets" | List current sprint tickets (paginated, say "show more" for next page) |
+| "show all assigned tickets" | List all assigned tickets |
+| "fetch my tickets which are at this station" | Search by any Jira status — AI generates proper JQL |
+| "find blocked tickets" / "tickets in QA" | Search by status, priority, or keywords |
+| "show ticket CE-1234" / "tell me about the second one" | Get full ticket details (supports ordinal references) |
 | "move ticket to in progress" | Transition ticket status |
-| "help" | List all available commands |
+| "show more" / "next page" | Paginate through ticket list |
+
+**Working on Tickets**
+
+| Say something like... | What it does |
+|----------------------|-------------|
+| "start working on CE-1234" | Resolve repos, pick agent, launch — fully automated |
+| "let's start working on the second one" | Start work using ordinal reference from last ticket list |
+| "start working on CE-124 and CE-3791" | Launch agents for multiple tickets in parallel |
+| "prepare branch for CE-1234" | Create/checkout a feature branch |
+| "commit my changes" | Stage all + commit (speaks commit message prompt) |
+| "push and create PR" | Push branch and create MR/PR |
+
+**Status & Review**
+
+| Say something like... | What it does |
+|----------------------|-------------|
+| "check status" / "git status" | Show branch and uncommitted changes |
+| "show progress" / "what is done" | Show todo checklist progress |
+| "check review comments" | Fetch unresolved PR/MR review comments |
+
+**General**
+
+| Say something like... | What it does |
+|----------------------|-------------|
+| "help" / "what can you do" | List all available commands |
 | "stop" / "goodbye" | Exit voice mode |
 
-Ticket keys are automatically extracted from speech (e.g., "show ticket C E 1 2 3 4" becomes `CE-1234`).
+#### How AI Parsing Works
+
+When you speak a command, ForgePilot:
+
+1. **Transcribes** your speech using Whisper (offline, in-process)
+2. **Sends the transcript to AI** (copilot/cursor CLI) along with context (last ticket, displayed ticket list, repo path)
+3. **AI returns a JSON command** with the handler name and extracted parameters (ticket keys, JQL queries, ordinal references, etc.)
+4. **Executes the command** using the AI-parsed result
+
+If the AI CLI is unavailable or times out (30s), ForgePilot falls back to keyword-based matching automatically.
 
 #### Voice Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FORGEPILOT_VOICE_TTS` | TTS command for spoken feedback | `say` (macOS) |
+| `FORGEPILOT_DEFAULT_AGENT` | Skip agent picker when starting ticket work | *(voice prompt)* |
+| `FORGEPILOT_PREFLIGHT_AGENT` | AI CLI used for voice command parsing (`copilot` or `cursor`) | `copilot` |
 
 ### Fully Hands-Free Mode
 
@@ -417,7 +459,7 @@ ForgePilot includes an MCP (Model Context Protocol) server that exposes all its 
 | `get_checkpoint` | Load checkpoint metadata for a ticket (agent, timestamps, repo path) |
 | `clear_checkpoint` | Discard checkpoint and optionally the todo file for a ticket |
 | `get_review_comments` | Find open PR/MR and fetch unresolved review comments for a ticket |
-| `start_voice_mode` | Start voice-controlled mode (requires `sherpa-onnx-node` and `sox`) |
+| `start_voice_mode` | Start AI-powered voice mode with natural language understanding (requires `sherpa-onnx-node`, `sox`, and `copilot`/`cursor` CLI) |
 
 ### Setup for Cursor
 
