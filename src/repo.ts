@@ -322,7 +322,7 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 	const ticketRepos = extractRepoLabels(description);
 	const repoMap = new Map<string, string>();
 
-	let rootDir = await getCached<string>('rootDir');
+	const rootDir = await getCached<string>('rootDir');
 	if (!rootDir) {
 		throw new Error('Root directory not cached. Run ForgePilot in terminal first to set it, or set FORGEPILOT_ROOT_DIR.');
 	}

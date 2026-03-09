@@ -13,8 +13,23 @@ const MIN_RECORDING_MS = 1000;
 const KEY_DEBOUNCE_MS = 500;
 
 let _voiceModeActive = false;
-let sherpaRecognizer: any = null;
-let sherpaModule: any = null;
+interface SherpaStream {
+	acceptWaveform(opts: { sampleRate: number; samples: Float32Array }): void;
+}
+
+interface SherpaRecognizer {
+	createStream(): SherpaStream;
+	decode(stream: SherpaStream): void;
+	getResult(stream: SherpaStream): { text?: string };
+}
+
+interface SherpaModule {
+	OfflineRecognizer: new (config: Record<string, unknown>) => SherpaRecognizer;
+	readWave(path: string): { sampleRate: number; samples: Float32Array };
+}
+
+let sherpaRecognizer: SherpaRecognizer | null = null;
+let sherpaModule: SherpaModule | null = null;
 let activeTtsProcess: ChildProcess | null = null;
 
 export function isVoiceModeActive(): boolean {
@@ -27,8 +42,8 @@ export function setVoiceModeActive(active: boolean): void {
 
 export function initRecognizer(): void {
 	if (sherpaRecognizer) return;
-	sherpaModule = esmRequire('sherpa-onnx-node');
-	sherpaRecognizer = new sherpaModule.OfflineRecognizer({
+	sherpaModule = esmRequire('sherpa-onnx-node') as SherpaModule;
+	sherpaRecognizer = new sherpaModule!.OfflineRecognizer({
 		featConfig: { sampleRate: 16000, featureDim: 80 },
 		modelConfig: {
 			whisper: {
@@ -94,91 +109,84 @@ export function getSherpaModelDir(): string {
 	return SHERPA_MODEL_DIR;
 }
 
-export function getSherpaModule(): any {
+export function getSherpaModule(): SherpaModule | null {
 	return sherpaModule;
 }
 
-export function getSherpaRecognizer(): any {
+export function getSherpaRecognizer(): SherpaRecognizer | null {
 	return sherpaRecognizer;
 }
 
-export function recordAndTranscribe(): Promise<string | null> {
-	return new Promise(async (resolve) => {
-		killTts();
+export async function recordAndTranscribe(): Promise<string | null> {
+	killTts();
 
-		const rawFile = path.join(os.tmpdir(), `forgepilot-qa-${Date.now()}-raw.wav`);
-		const proc = spawn('rec', [rawFile, 'rate', '16000', 'channels', '1'], {
-			stdio: ['ignore', 'ignore', 'ignore'],
-		});
-		const startedAt = Date.now();
-
-		console.log(chalk.green('  🎙  Recording... press [Space] to stop'));
-
-		await drainKeypressesInternal(KEY_DEBOUNCE_MS);
-
-		const stopKey = await waitForKeyInternal(['space']);
-		if (stopKey === 'quit') {
-			try { proc.kill(); } catch { /* */ }
-			resolve(null);
-			return;
-		}
-
-		const elapsed = Date.now() - startedAt;
-		if (elapsed < MIN_RECORDING_MS) {
-			await new Promise((r) => setTimeout(r, MIN_RECORDING_MS - elapsed));
-		}
-
-		await new Promise<void>((res) => {
-			proc.on('close', () => res());
-			try { proc.kill('SIGTERM'); } catch { res(); return; }
-			setTimeout(res, 3000);
-		});
-
-		const pcmFile = rawFile.replace('-raw.wav', '.wav');
-
-		try {
-			if (!existsSync(rawFile)) {
-				console.error(chalk.red('  Recording file not created.'));
-				resolve(null);
-				return;
-			}
-			const rawSize = statSync(rawFile).size;
-			if (rawSize < 1000) {
-				console.error(chalk.yellow('  Recording too short. Speak longer.'));
-				resolve(null);
-				return;
-			}
-
-			execSync(`sox "${rawFile}" -r 16000 -c 1 -b 16 "${pcmFile}" 2>/dev/null`, { timeout: 10000 });
-
-			if (!existsSync(pcmFile)) {
-				console.error(chalk.red('  WAV conversion failed.'));
-				resolve(null);
-				return;
-			}
-
-			const wave = sherpaModule.readWave(pcmFile);
-			const stream = sherpaRecognizer.createStream();
-			stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: wave.samples });
-			sherpaRecognizer.decode(stream);
-			const result = sherpaRecognizer.getResult(stream);
-			const text = (result?.text ?? '').trim();
-
-			if (!text || text === '[BLANK_AUDIO]') {
-				resolve(null);
-				return;
-			}
-			console.log(chalk.bold(`  You said: "${text}"`));
-			resolve(text);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			console.error(chalk.red(`  Transcription failed: ${msg.slice(0, 200)}`));
-			resolve(null);
-		} finally {
-			try { unlinkSync(rawFile); } catch { /* */ }
-			try { unlinkSync(pcmFile); } catch { /* */ }
-		}
+	const rawFile = path.join(os.tmpdir(), `forgepilot-qa-${Date.now()}-raw.wav`);
+	const proc = spawn('rec', [rawFile, 'rate', '16000', 'channels', '1'], {
+		stdio: ['ignore', 'ignore', 'ignore'],
 	});
+	const startedAt = Date.now();
+
+	console.log(chalk.green('  🎙  Recording... press [Space] to stop'));
+
+	await drainKeypressesInternal(KEY_DEBOUNCE_MS);
+
+	const stopKey = await waitForKeyInternal(['space']);
+	if (stopKey === 'quit') {
+		try { proc.kill(); } catch { /* */ }
+		return null;
+	}
+
+	const elapsed = Date.now() - startedAt;
+	if (elapsed < MIN_RECORDING_MS) {
+		await new Promise((r) => setTimeout(r, MIN_RECORDING_MS - elapsed));
+	}
+
+	await new Promise<void>((res) => {
+		proc.on('close', () => res());
+		try { proc.kill('SIGTERM'); } catch { res(); return; }
+		setTimeout(res, 3000);
+	});
+
+	const pcmFile = rawFile.replace('-raw.wav', '.wav');
+
+	try {
+		if (!existsSync(rawFile)) {
+			console.error(chalk.red('  Recording file not created.'));
+			return null;
+		}
+		const rawSize = statSync(rawFile).size;
+		if (rawSize < 1000) {
+			console.error(chalk.yellow('  Recording too short. Speak longer.'));
+			return null;
+		}
+
+		execSync(`sox "${rawFile}" -r 16000 -c 1 -b 16 "${pcmFile}" 2>/dev/null`, { timeout: 10000 });
+
+		if (!existsSync(pcmFile)) {
+			console.error(chalk.red('  WAV conversion failed.'));
+			return null;
+		}
+
+		const wave = sherpaModule!.readWave(pcmFile);
+		const stream = sherpaRecognizer!.createStream();
+		stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: wave.samples });
+		sherpaRecognizer!.decode(stream);
+		const result = sherpaRecognizer!.getResult(stream);
+		const text = (result?.text ?? '').trim();
+
+		if (!text || text === '[BLANK_AUDIO]') {
+			return null;
+		}
+		console.log(chalk.bold(`  You said: "${text}"`));
+		return text;
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.error(chalk.red(`  Transcription failed: ${msg.slice(0, 200)}`));
+		return null;
+	} finally {
+		try { unlinkSync(rawFile); } catch { /* */ }
+		try { unlinkSync(pcmFile); } catch { /* */ }
+	}
 }
 
 function waitForKeyInternal(accept: string[]): Promise<string> {

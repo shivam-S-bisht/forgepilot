@@ -220,7 +220,7 @@ function formatTicketDetailForSlack(detail: JiraIssueDetail): string {
 	return lines.join('\n');
 }
 
-export async function startSlackCli(tickets: TicketView[], _boards: Map<number, string>): Promise<void> {
+export async function startSlackCli(tickets: TicketView[], __boards: Map<number, string>): Promise<void> {
 	console.log(chalk.bold('\nSlack-driven workflow active.'));
 	await notifySlackStatus(':robot_face: *ForgePilot is ready.* Waiting for your selections via Slack...');
 

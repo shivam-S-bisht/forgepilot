@@ -247,11 +247,11 @@ async function stopRecordingAndTranscribe(state: VoiceState): Promise<string | n
 		const fileSize = statSync(pcmFile).size;
 		console.log(chalk.gray(`  Recorded ${(fileSize / 1024).toFixed(1)} KB of audio.`));
 
-		const wave = getSherpaModule().readWave(pcmFile);
-		const stream = getSherpaRecognizer().createStream();
+		const wave = getSherpaModule()!.readWave(pcmFile);
+		const stream = getSherpaRecognizer()!.createStream();
 		stream.acceptWaveform({ sampleRate: wave.sampleRate, samples: wave.samples });
-		getSherpaRecognizer().decode(stream);
-		const result = getSherpaRecognizer().getResult(stream);
+		getSherpaRecognizer()!.decode(stream);
+		const result = getSherpaRecognizer()!.getResult(stream);
 		const text = (result?.text ?? '').trim();
 
 		if (!text || text === '[BLANK_AUDIO]') return null;
@@ -356,7 +356,7 @@ async function handleGetTicketDetails(params: Record<string, string>, state: Voi
 	printAndSpeak(`Ticket ${key}: ${detail.fields.summary ?? 'no title'}. Status: ${detail.fields.status?.name ?? 'unknown'}.`);
 }
 
-async function resolveAgent(state: VoiceState): Promise<ReturnType<typeof resolveAgentOptionById> | null> {
+async function resolveAgent(__state: VoiceState): Promise<ReturnType<typeof resolveAgentOptionById> | null> {
 	const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
 	if (defaultAgentId) {
 		const opt = resolveAgentOptionById(defaultAgentId) ?? null;
