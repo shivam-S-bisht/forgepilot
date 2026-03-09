@@ -14,11 +14,51 @@ export type VoiceCommand = {
 };
 
 const TICKET_KEY_PATTERN = /\b([A-Z]{1,10})[- ]?(\d{1,6})\b/;
+const TICKET_KEY_PATTERN_GLOBAL = /\b([A-Z]{1,10})[- ]?(\d{1,6})\b/g;
 
 function extractTicketKey(transcript: string): string | undefined {
 	const match = transcript.toUpperCase().match(TICKET_KEY_PATTERN);
 	if (!match) return undefined;
 	return `${match[1]}-${match[2]}`;
+}
+
+export function extractAllTicketKeys(transcript: string): string[] {
+	const upper = transcript.toUpperCase();
+	const keys: string[] = [];
+	let m: RegExpExecArray | null;
+	while ((m = TICKET_KEY_PATTERN_GLOBAL.exec(upper)) !== null) {
+		keys.push(`${m[1]}-${m[2]}`);
+	}
+	return [...new Set(keys)];
+}
+
+const ORDINAL_MAP: Record<string, number> = {
+	first: 0, '1st': 0, one: 0,
+	second: 1, '2nd': 1, two: 1,
+	third: 2, '3rd': 2, three: 2,
+	fourth: 3, '4th': 3, four: 3,
+	fifth: 4, '5th': 4, five: 4,
+	sixth: 5, '6th': 5, six: 5,
+	seventh: 6, '7th': 6, seven: 6,
+	eighth: 7, '8th': 7, eight: 7,
+	ninth: 8, '9th': 8, nine: 8,
+	tenth: 9, '10th': 9, ten: 9,
+	last: -1,
+};
+
+export function extractOrdinalIndex(transcript: string): number | undefined {
+	const lower = transcript.toLowerCase();
+	for (const [word, idx] of Object.entries(ORDINAL_MAP)) {
+		if (lower.includes(word)) return idx;
+	}
+	const numMatch = lower.match(/\bnumber\s+(\d+)/);
+	if (numMatch) return parseInt(numMatch[1], 10) - 1;
+	return undefined;
+}
+
+function extractOrdinalStr(transcript: string): string | undefined {
+	const idx = extractOrdinalIndex(transcript);
+	return idx !== undefined ? String(idx) : undefined;
 }
 
 function extractScope(transcript: string): TicketScope {
@@ -70,6 +110,10 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 				name: 'ticket_key',
 				extract: extractTicketKey,
 			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
 		],
 		handler: 'getTicketDetails',
 	},
@@ -93,6 +137,17 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 				name: 'ticket_key',
 				extract: extractTicketKey,
 			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
+			{
+				name: 'ticket_keys',
+				extract: (transcript: string) => {
+					const keys = extractAllTicketKeys(transcript);
+					return keys.length > 1 ? keys.join(',') : undefined;
+				},
+			},
 		],
 		handler: 'startTicket',
 	},
@@ -115,6 +170,10 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 			{
 				name: 'ticket_key',
 				extract: extractTicketKey,
+			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
 			},
 		],
 		handler: 'pushAndCreatePR',
@@ -155,6 +214,10 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 				name: 'ticket_key',
 				extract: extractTicketKey,
 			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
 		],
 		handler: 'showTodoProgress',
 	},
@@ -175,6 +238,10 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 				name: 'ticket_key',
 				extract: extractTicketKey,
 			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
 		],
 		handler: 'checkReviewComments',
 	},
@@ -193,14 +260,103 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 				name: 'ticket_key',
 				extract: extractTicketKey,
 			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
 		],
 		handler: 'transitionTicket',
 	},
 	{
 		id: 'search_tickets',
-		phrases: ['search tickets', 'search jira', 'find tickets', 'query tickets'],
+		phrases: [
+			'search tickets',
+			'search jira',
+			'find tickets',
+			'query tickets',
+			'tickets in',
+			'show tickets in',
+			'blocked tickets',
+			'tickets in qa',
+			'tickets in review',
+			'tickets in progress',
+			'tickets in backlog',
+			'tickets about',
+			'find blocked',
+			'high priority tickets',
+			'urgent tickets',
+		],
 		description: 'Search Jira with a spoken query (converted to JQL)',
+		params: [
+			{
+				name: 'query',
+				extract: (transcript: string) => transcript,
+			},
+		],
 		handler: 'searchTickets',
+	},
+	{
+		id: 'commit_changes',
+		phrases: [
+			'commit changes',
+			'commit my changes',
+			'git commit',
+			'save changes',
+			'commit work',
+			'commit the code',
+			'make a commit',
+		],
+		description: 'Stage and commit all changes with a spoken commit message',
+		params: [
+			{
+				name: 'ticket_key',
+				extract: extractTicketKey,
+			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
+		],
+		handler: 'commitChanges',
+	},
+	{
+		id: 'prepare_branch',
+		phrases: [
+			'prepare branch',
+			'create branch',
+			'make a branch',
+			'set up branch',
+			'prepare repo',
+			'checkout branch',
+			'new branch',
+		],
+		description: 'Create and checkout a feature branch for a ticket',
+		params: [
+			{
+				name: 'ticket_key',
+				extract: extractTicketKey,
+			},
+			{
+				name: 'ticket_index',
+				extract: extractOrdinalStr,
+			},
+		],
+		handler: 'prepareBranch',
+	},
+	{
+		id: 'show_more',
+		phrases: [
+			'show more',
+			'next page',
+			'more tickets',
+			'show next',
+			'next',
+			'show the rest',
+			'continue',
+			'keep going',
+		],
+		description: 'Show the next page of tickets',
+		handler: 'showMore',
 	},
 	{
 		id: 'help',

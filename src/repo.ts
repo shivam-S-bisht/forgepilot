@@ -277,6 +277,46 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 	return repoMap;
 }
 
+export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map<string, string>> {
+	const repoMap = new Map<string, string>();
+
+	const cacheKey = `repoChoice_${detail.key}`;
+	const cached = await getCached<string[]>(cacheKey);
+	if (cached?.length) {
+		const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
+		if (allValid) {
+			for (const p of cached) repoMap.set(path.basename(p), p);
+			return repoMap;
+		}
+	}
+
+	let rootDir = await getCached<string>('rootDir');
+	if (!rootDir) {
+		rootDir = process.env.FORGEPILOT_ROOT_DIR?.trim() || '';
+		if (!rootDir || !existsSync(rootDir)) return repoMap;
+	}
+
+	const description = getDescriptionText(detail);
+	const ticketRepos = extractRepoLabels(description);
+	if (!ticketRepos.length) return repoMap;
+
+	const localRepoPaths = await scanLocalRepos(rootDir);
+	const remoteIndex = new Map<string, string>();
+	for (const localPath of localRepoPaths) {
+		const remotes = await getRemoteUrls(localPath);
+		for (const remote of remotes) {
+			if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+		}
+	}
+
+	for (const repo of ticketRepos) {
+		const localPath = remoteIndex.get(repo.normalizedUrl);
+		if (localPath) repoMap.set(repo.normalizedUrl, localPath);
+	}
+
+	return repoMap;
+}
+
 export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise<Map<string, string>> {
 	const description = getDescriptionText(detail);
 	const ticketRepos = extractRepoLabels(description);
