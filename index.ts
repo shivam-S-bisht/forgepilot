@@ -12,6 +12,7 @@ import { slackPickScope, startSlackCli } from './src/slack-cli.js';
 import { isSlackFullFlowEnabled } from './src/slack.js';
 import { renderScopePicker } from './src/ui.js';
 import type { ScopeOption } from './src/ui.js';
+import { startVoiceMode } from './src/voice.js';
 
 const SCOPE_OPTIONS: ScopeOption[] = [
 	{
@@ -25,6 +26,10 @@ const SCOPE_OPTIONS: ScopeOption[] = [
 		description: 'All unresolved tickets assigned to you across all sprints.',
 	},
 ];
+
+function isVoiceMode(): boolean {
+	return process.argv.includes('--voice') || process.argv.includes('-v');
+}
 
 function isAutoMode(): boolean {
 	return (process.env.FORGEPILOT_AUTO_ALL_TICKETS ?? '').trim().toLowerCase() === 'true';
@@ -113,6 +118,12 @@ function printActiveConfig() {
 async function main() {
 	try {
 		activateAxonVenv();
+
+		if (isVoiceMode()) {
+			await startVoiceMode();
+			return;
+		}
+
 		printActiveConfig();
 
 		const auto = isAutoMode();

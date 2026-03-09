@@ -14,6 +14,7 @@ export default defineConfig((options) => ({
 	minify: !options.watch,
 	keepNames: false,
 	outExtension: () => ({ js: '.js' }),
+	external: ['sherpa-onnx-node'],
 	esbuildOptions(buildOptions) {
 		buildOptions.define = {
 			...(buildOptions.define ?? {}),

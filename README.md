@@ -11,6 +11,7 @@ flowchart TD
     subgraph entryPoints [Entry Points]
         CLI["forgepilot CLI"]
         MCP["forgepilot-mcp Server"]
+        Voice["forgepilot --voice"]
     end
 
     subgraph scopeSelection [Scope Selection]
@@ -48,6 +49,7 @@ flowchart TD
     end
 
     CLI --> Scope
+    Voice -->|"push-to-talk"| FetchTickets
     MCP --> FetchTickets
     Scope --> CurrentSprint --> FetchTickets
     Scope --> AllAssigned --> FetchTickets
@@ -68,6 +70,24 @@ flowchart TD
 ```
 
 ## Install
+
+### System Dependencies (optional)
+
+For **voice mode**, install `sox` (audio recording):
+
+```bash
+brew install sox
+```
+
+Then download the Whisper speech-to-text model (~98 MB total):
+
+```bash
+mkdir -p ~/.forgepilot/sherpa-models/whisper-tiny.en
+cd ~/.forgepilot/sherpa-models/whisper-tiny.en
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt
+```
 
 ### Local development
 
@@ -225,6 +245,70 @@ export FORGEPILOT_SLACK_EXPECTED_USER_ID="U0123456789"  # optional
 forgepilot
 ```
 
+### Voice Mode
+
+ForgePilot includes a push-to-talk voice interface that uses macOS built-in speech recognition. Hold a key to talk, release when done.
+
+#### Prerequisites
+
+Install `sox` (audio recording):
+
+```bash
+brew install sox
+```
+
+Download the Whisper tiny.en model for sherpa-onnx (~98 MB total):
+
+```bash
+mkdir -p ~/.forgepilot/sherpa-models/whisper-tiny.en
+cd ~/.forgepilot/sherpa-models/whisper-tiny.en
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx
+curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt
+```
+
+Speech recognition runs entirely in-process via `sherpa-onnx-node` (a Node.js addon wrapping OpenAI's Whisper) -- completely free, no API keys, fully offline. `sox` provides the `rec` command for microphone recording.
+
+#### Usage
+
+```bash
+forgepilot --voice
+# or
+export FORGEPILOT_VOICE="true"
+forgepilot
+```
+
+Push-to-talk controls:
+
+| Key | Action |
+|-----|--------|
+| Press **Space** | Start recording -- speak your command |
+| Press **Space** again | Stop recording -- ForgePilot transcribes and processes your speech |
+| **q** or **Ctrl+C** | Exit voice mode |
+
+#### Supported Voice Commands
+
+| Say this... | What it does |
+|-------------|-------------|
+| "fetch my tickets" / "show sprint" | List current sprint tickets |
+| "show ticket CE-1234" | Get full ticket details |
+| "start working on CE-1234" | Start ticket workflow |
+| "push and create PR" | Push branch and create MR/PR |
+| "check status" | Show git branch status |
+| "show progress" / "show todos" | Show todo checklist progress |
+| "check review comments" | Fetch unresolved PR/MR comments |
+| "move ticket to in progress" | Transition ticket status |
+| "help" | List all available commands |
+| "stop" / "goodbye" | Exit voice mode |
+
+Ticket keys are automatically extracted from speech (e.g., "show ticket C E 1 2 3 4" becomes `CE-1234`).
+
+#### Voice Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FORGEPILOT_VOICE_TTS` | TTS command for spoken feedback | `say` (macOS) |
+
 ### Fully Hands-Free Mode
 
 Set Jira credentials and automation flags for zero-interaction execution:
@@ -333,6 +417,7 @@ ForgePilot includes an MCP (Model Context Protocol) server that exposes all its 
 | `get_checkpoint` | Load checkpoint metadata for a ticket (agent, timestamps, repo path) |
 | `clear_checkpoint` | Discard checkpoint and optionally the todo file for a ticket |
 | `get_review_comments` | Find open PR/MR and fetch unresolved review comments for a ticket |
+| `start_voice_mode` | Start voice-controlled mode (requires `sherpa-onnx-node` and `sox`) |
 
 ### Setup for Cursor
 
