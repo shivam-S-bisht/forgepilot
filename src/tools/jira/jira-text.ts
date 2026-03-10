@@ -1,5 +1,5 @@
 import { getJiraBaseUrl } from './jira-client.js';
-import type { JiraIssueDetail, SprintInfo } from './types.js';
+import type { JiraIssueDetail, SprintInfo } from '../../core/types.js';
 
 const DEFAULT_AC_FIELD_IDS = ['customfield_13223', 'customfield_10039'];
 

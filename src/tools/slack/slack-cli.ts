@@ -5,16 +5,16 @@ import {
 	launchAgentForRepos,
 	launchMultipleTickets,
 	resolveAgentOptionById,
-} from './agents.js';
-import { pushBranchAndCreateMR } from './git.js';
-import { fetchIssueDetail } from './jira.js';
-import type { TicketScope } from './jira.js';
-import { getDescriptionText, getJiraBrowseUrl } from './jira-text.js';
-import { resolveRepoPathsViaSlack } from './repo.js';
+} from '../../core/agents.js';
+import { pushBranchAndCreateMR } from '../git/git.js';
+import { fetchIssueDetail } from '../jira/jira.js';
+import type { TicketScope } from '../jira/jira.js';
+import { getDescriptionText, getJiraBrowseUrl } from '../jira/jira-text.js';
+import { resolveRepoPathsViaSlack } from '../../core/repo.js';
 import { notifySlackStatus, postAndWaitForSelection } from './slack.js';
 import type { SlackPickOption } from './slack.js';
-import type { JiraIssueDetail, TicketRunStatus, TicketView, WorkAgentOption } from './types.js';
-import { renderMultiTicketDashboard, renderMultiTicketSummary } from './ui.js';
+import type { JiraIssueDetail, TicketRunStatus, TicketView, WorkAgentOption } from '../../core/types.js';
+import { renderMultiTicketDashboard, renderMultiTicketSummary } from '../../core/ui.js';
 
 const INTERACTIVE_AGENT_IDS = new Set(['copilot-interactive', 'claude-code-interactive']);
 

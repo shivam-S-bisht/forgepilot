@@ -1,4 +1,4 @@
-import type { TicketScope } from './jira.js';
+import type { TicketScope } from '../jira/jira.js';
 
 export type VoiceCommandParam = {
 	name: string;

@@ -8,14 +8,14 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 
 import { matchCommand, VOICE_COMMANDS, type MatchedCommand } from './voice-commands.js';
-import { fetchTicketsByScope, fetchTicketsByJql } from './jira.js';
-import type { TicketScope } from './jira.js';
-import { fetchIssueDetail, transitionIssueToInProgress } from './jira.js';
-import { getDescriptionText, getAcceptanceCriteria, getJiraBrowseUrl } from './jira-text.js';
-import { gitExec, findOpenPullRequest, fetchUnresolvedReviewComments, pushBranchAndCreateMR, prepareRepoForWork } from './git.js';
-import { parseTodoProgress, getAvailableAgentOptions, launchAgentForRepos, launchMultipleTickets, resolveAgentOptionById } from './agents.js';
-import { getCached } from './cache.js';
-import { resolveRepoPathsAuto } from './repo.js';
+import { fetchTicketsByScope, fetchTicketsByJql } from '../jira/jira.js';
+import type { TicketScope } from '../jira/jira.js';
+import { fetchIssueDetail, transitionIssueToInProgress } from '../jira/jira.js';
+import { getDescriptionText, getAcceptanceCriteria, getJiraBrowseUrl } from '../jira/jira-text.js';
+import { gitExec, findOpenPullRequest, fetchUnresolvedReviewComments, pushBranchAndCreateMR, prepareRepoForWork } from '../git/git.js';
+import { parseTodoProgress, getAvailableAgentOptions, launchAgentForRepos, launchMultipleTickets, resolveAgentOptionById } from '../../core/agents.js';
+import { getCached } from '../../core/cache.js';
+import { resolveRepoPathsAuto } from '../../core/repo.js';
 import {
 	checkVoiceDependencies,
 	initRecognizer,

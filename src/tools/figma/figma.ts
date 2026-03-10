@@ -1,7 +1,7 @@
 import chalk from 'chalk';
-import { getCached, setCached } from './cache.js';
-import { adfToText, commentsText, getAcceptanceCriteria, getDescriptionText } from './jira-text.js';
-import type { JiraIssueDetail } from './types.js';
+import { getCached, setCached } from '../../core/cache.js';
+import { adfToText, commentsText, getAcceptanceCriteria, getDescriptionText } from '../jira/jira-text.js';
+import type { JiraIssueDetail } from '../../core/types.js';
 
 const FIGMA_URL_REGEX = /https?:\/\/(?:www\.)?figma\.com\/(?:design|file|proto|board)\/[^\s)\]>,]+/gi;
 const FIGMA_API_BASE = 'https://api.figma.com/v1';

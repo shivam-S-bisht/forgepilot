@@ -2,17 +2,17 @@
 
 import readline from 'node:readline';
 import chalk from 'chalk';
-import { resolveAgentOptionById } from './src/agents.js';
-import { activateAxonVenv } from './src/axon.js';
-import { getCached, setCached } from './src/cache.js';
-import { runAutoMode, startInteractiveCli } from './src/cli.js';
-import { fetchBoards, fetchTicketsByScope } from './src/jira.js';
-import type { TicketScope } from './src/jira.js';
-import { slackPickScope, startSlackCli } from './src/slack-cli.js';
-import { isSlackFullFlowEnabled } from './src/slack.js';
-import { renderScopePicker } from './src/ui.js';
-import type { ScopeOption } from './src/ui.js';
-import { startVoiceMode } from './src/voice.js';
+import { resolveAgentOptionById } from './src/core/agents.js';
+import { activateAxonVenv } from './src/tools/axon/axon.js';
+import { getCached, setCached } from './src/core/cache.js';
+import { runAutoMode, startInteractiveCli } from './src/core/cli.js';
+import { fetchBoards, fetchTicketsByScope } from './src/tools/jira/jira.js';
+import type { TicketScope } from './src/tools/jira/jira.js';
+import { slackPickScope, startSlackCli } from './src/tools/slack/slack-cli.js';
+import { isSlackFullFlowEnabled } from './src/tools/slack/slack.js';
+import { renderScopePicker } from './src/core/ui.js';
+import type { ScopeOption } from './src/core/ui.js';
+import { startVoiceMode } from './src/tools/voice/voice.js';
 
 const SCOPE_OPTIONS: ScopeOption[] = [
 	{

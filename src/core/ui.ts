@@ -6,7 +6,7 @@ import {
 	getAcceptanceCriteria,
 	getDescriptionText,
 	linkedIssuesText,
-} from './jira-text.js';
+} from '../tools/jira/jira-text.js';
 import type { TicketRunStatus, TicketView, WorkAgentOption } from './types.js';
 
 const LIST_PAGE_SIZE = 20;

@@ -7,9 +7,9 @@ import {
 	launchMultipleTickets,
 	resolveAgentOptionById,
 } from './agents.js';
-import { pushBranchAndCreateMR } from './git.js';
-import { fetchIssueDetail, fetchTicketsByJql, LOAD_MORE_TICKETS_JQL } from './jira.js';
-import { getJiraBrowseUrl } from './jira-text.js';
+import { pushBranchAndCreateMR } from '../tools/git/git.js';
+import { fetchIssueDetail, fetchTicketsByJql, LOAD_MORE_TICKETS_JQL } from '../tools/jira/jira.js';
+import { getJiraBrowseUrl } from '../tools/jira/jira-text.js';
 import { resolveRepoPathsFromUser } from './repo.js';
 import type { TicketRunStatus, TicketView, WorkAgentOption } from './types.js';
 import {

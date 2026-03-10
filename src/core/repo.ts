@@ -6,9 +6,9 @@ import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
-import { getDescriptionText } from './jira-text.js';
-import { postAndWaitForSelection } from './slack.js';
-import type { SlackPickOption } from './slack.js';
+import { getDescriptionText } from '../tools/jira/jira-text.js';
+import { postAndWaitForSelection } from '../tools/slack/slack.js';
+import type { SlackPickOption } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, RepoLabel, TicketRepoResolution } from './types.js';
 import { renderRepoPicker } from './ui.js';
 

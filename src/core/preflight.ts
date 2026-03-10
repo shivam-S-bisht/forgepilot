@@ -4,9 +4,9 @@ import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
-import { commentsText, getAcceptanceCriteria, getDescriptionText, linkedIssuesText } from './jira-text.js';
+import { commentsText, getAcceptanceCriteria, getDescriptionText, linkedIssuesText } from '../tools/jira/jira-text.js';
 import { extractRepoLabels } from './repo.js';
-import { askConcernViaSlack, shouldUseSlackQa } from './slack.js';
+import { askConcernViaSlack, shouldUseSlackQa } from '../tools/slack/slack.js';
 import type { JiraIssueDetail } from './types.js';
 
 const execFileAsync = promisify(execFile);

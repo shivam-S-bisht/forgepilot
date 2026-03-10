@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import type { PreflightConcern } from './preflight.js';
+import type { PreflightConcern } from '../../core/preflight.js';
 
 type SlackPostMessageResponse = {
 	ok: boolean;

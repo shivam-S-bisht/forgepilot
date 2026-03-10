@@ -1,5 +1,5 @@
 import { jiraFetch } from './jira-client.js';
-import type { JiraBoard, JiraIssueDetail, JiraIssueSummary, TicketView } from './types.js';
+import type { JiraBoard, JiraIssueDetail, JiraIssueSummary, TicketView } from '../../core/types.js';
 
 export type TicketScope = 'current-sprint' | 'all-assigned';
 

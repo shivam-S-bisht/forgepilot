@@ -3,16 +3,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { activateAxonVenv, getAxonPromptHint, startAxonWatch } from './src/axon.js';
-import { parseTodoProgress } from './src/agents.js';
-import { clearCache, clearCached, getAllCache, getCached, setCached } from './src/cache.js';
-import { fetchFigmaDesignContext } from './src/figma.js';
-import { fetchUnresolvedReviewComments, findOpenPullRequest, gitExec, prepareRepoForWork, pushBranchAndCreateMR, readContributing } from './src/git.js';
-import { fetchBoards, fetchIssueDetail, fetchTicketsByJql, fetchTicketsByScope, transitionIssueToInProgress } from './src/jira.js';
-import type { TicketScope } from './src/jira.js';
-import { buildWorkPrompt, getAcceptanceCriteria, getDescriptionText, getJiraBrowseUrl, linkedIssuesText, commentsText } from './src/jira-text.js';
-import { extractRepoLabels, getRemoteUrls, scanLocalRepos } from './src/repo.js';
-import { askQuestionViaSlack, shouldUseSlackQa } from './src/slack.js';
+import { activateAxonVenv, getAxonPromptHint, startAxonWatch } from './src/tools/axon/axon.js';
+import { parseTodoProgress } from './src/core/agents.js';
+import { clearCache, clearCached, getAllCache, getCached, setCached } from './src/core/cache.js';
+import { fetchFigmaDesignContext } from './src/tools/figma/figma.js';
+import { fetchUnresolvedReviewComments, findOpenPullRequest, gitExec, prepareRepoForWork, pushBranchAndCreateMR, readContributing } from './src/tools/git/git.js';
+import { fetchBoards, fetchIssueDetail, fetchTicketsByJql, fetchTicketsByScope, transitionIssueToInProgress } from './src/tools/jira/jira.js';
+import type { TicketScope } from './src/tools/jira/jira.js';
+import { buildWorkPrompt, getAcceptanceCriteria, getDescriptionText, getJiraBrowseUrl, linkedIssuesText, commentsText } from './src/tools/jira/jira-text.js';
+import { extractRepoLabels, getRemoteUrls, scanLocalRepos } from './src/core/repo.js';
+import { askQuestionViaSlack, shouldUseSlackQa } from './src/tools/slack/slack.js';
 
 activateAxonVenv();
 
@@ -704,7 +704,7 @@ server.tool(
 	'Start ForgePilot push-to-talk voice mode with AI-powered natural language understanding. Uses sherpa-onnx-node (Whisper) for in-process speech recognition, sox for recording, and copilot/cursor CLI for AI command parsing. Supports all CLI operations: fetch/search tickets by status or keyword, start work on single or multiple tickets in parallel, commit changes, prepare branches, push and create PRs, and more. Press Space to start/stop recording. Only works in a terminal with microphone access.',
 	{},
 	async () => {
-		const { startVoiceMode } = await import('./src/voice.js');
+		const { startVoiceMode } = await import('./src/tools/voice/voice.js');
 		startVoiceMode().catch(() => {});
 		return {
 			content: [{

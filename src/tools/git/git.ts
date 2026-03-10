@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
-import { getCached, setCached } from './cache.js';
+import { getCached, setCached } from '../../core/cache.js';
 
 const execFileAsync = promisify(execFile);
 
