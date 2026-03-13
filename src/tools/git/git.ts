@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from '../../core/cache.js';
+import { askUser, askUserChoice } from '../../core/ask.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -536,11 +537,19 @@ export async function pushBranchAndCreateMR(
 	jiraUrl: string,
 ): Promise<string> {
 	const branchName = ticketKey.toUpperCase();
-	const baseBranch = getBaseBranch();
+	let baseBranch = getBaseBranch();
 
-	console.log(chalk.gray(`  Pushing ${branchName} to origin...`));
-	await gitExec(repoPath, ['push', '-u', 'origin', branchName]);
-	console.log(chalk.green(`  Pushed ${branchName} to origin.`));
+	// --- Pre-push review ---
+	let diffStat = '';
+	try {
+		diffStat = await gitExec(repoPath, ['diff', '--stat', `${baseBranch}...HEAD`]);
+	} catch {
+		try {
+			diffStat = await gitExec(repoPath, ['diff', '--stat', 'HEAD~5..HEAD']);
+		} catch {
+			diffStat = '(could not compute diff stats)';
+		}
+	}
 
 	let commitLog = '';
 	try {
@@ -549,21 +558,115 @@ export async function pushBranchAndCreateMR(
 		commitLog = await gitExec(repoPath, ['log', '--oneline', '-20']);
 	}
 
-	const mrTitle = `${ticketKey.toUpperCase()} ${ticketTitle}`;
+	const commitCount = commitLog.split('\n').filter(Boolean).length;
+
+	console.log(chalk.bold.cyan(`\n  Pre-push review for ${branchName}:`));
+	console.log(chalk.gray(`  Branch: ${branchName} → ${baseBranch}`));
+	console.log(chalk.gray(`  Commits: ${commitCount}`));
+	console.log('');
+	console.log(chalk.white(diffStat.split('\n').map((l) => `    ${l}`).join('\n')));
+	console.log('');
+
+	const pushChoice = await askUserChoice('Do the changes look good?', [
+		{ id: 'push', label: 'Yes — push and create MR/PR' },
+		{ id: 'cancel', label: 'No — cancel, do not push' },
+	]);
+
+	if (pushChoice === 'cancel') {
+		console.log(chalk.yellow('  Push cancelled by user.'));
+		return '';
+	}
+
+	console.log(chalk.gray(`  Pushing ${branchName} to origin...`));
+	await gitExec(repoPath, ['push', '-u', 'origin', branchName]);
+	console.log(chalk.green(`  ✓ Pushed ${branchName} to origin.`));
+
+	// --- MR/PR preview and edit ---
+	let mrTitle = `${ticketKey.toUpperCase()} ${ticketTitle}`;
 	const commitBullets = commitLog
 		.split('\n')
 		.map((line) => line.trim())
 		.filter(Boolean)
 		.map((line) => `- ${line}`)
 		.join('\n');
-	const mrBody = `${commitBullets}\n\n${jiraUrl}`;
 
+	const maxReviewRounds = 5;
+	for (let round = 0; round < maxReviewRounds; round++) {
+		const mrBody = `${commitBullets}\n\n${jiraUrl}`;
+
+		console.log(chalk.bold.cyan('\n  MR/PR Preview:'));
+		console.log(chalk.white(`    Title:  ${mrTitle}`));
+		console.log(chalk.white(`    Base:   ${baseBranch}`));
+		console.log(chalk.white(`    Description:`));
+		for (const line of commitBullets.split('\n')) {
+			console.log(chalk.gray(`      ${line}`));
+		}
+		if (jiraUrl) console.log(chalk.gray(`      ${jiraUrl}`));
+		console.log('');
+
+		const choice = await askUserChoice('Proceed with MR/PR creation?', [
+			{ id: 'create', label: 'Create MR/PR' },
+			{ id: 'title', label: 'Change title' },
+			{ id: 'base', label: 'Change base branch' },
+			{ id: 'cancel', label: 'Cancel — skip MR/PR creation' },
+		]);
+
+		if (choice.startsWith('__unmatched__:')) {
+			mrTitle = choice.slice('__unmatched__:'.length).trim();
+			if (!mrTitle.toUpperCase().startsWith(ticketKey.toUpperCase())) {
+				mrTitle = `${ticketKey.toUpperCase()} ${mrTitle}`;
+			}
+			console.log(chalk.green(`  ✓ Title updated to: ${mrTitle}`));
+			continue;
+		}
+
+		if (choice === 'create') {
+			return await createMrOnPlatform(repoPath, ticketKey, branchName, baseBranch, mrTitle, mrBody);
+		}
+
+		if (choice === 'title') {
+			const newTitle = await askUser('  Enter new title: ');
+			if (newTitle) {
+				mrTitle = newTitle.toUpperCase().startsWith(ticketKey.toUpperCase())
+					? newTitle
+					: `${ticketKey.toUpperCase()} ${newTitle}`;
+				console.log(chalk.green(`  ✓ Title updated.`));
+			}
+			continue;
+		}
+
+		if (choice === 'base') {
+			const newBase = await askUser(`  Enter base branch (current: ${baseBranch}): `);
+			if (newBase) {
+				baseBranch = newBase.trim();
+				console.log(chalk.green(`  ✓ Base branch updated to: ${baseBranch}`));
+			}
+			continue;
+		}
+
+		if (choice === 'cancel') {
+			console.log(chalk.yellow('  MR/PR creation skipped. Branch is already pushed.'));
+			return '';
+		}
+	}
+
+	const finalBody = `${commitBullets}\n\n${jiraUrl}`;
+	return await createMrOnPlatform(repoPath, ticketKey, branchName, baseBranch, mrTitle, finalBody);
+}
+
+async function createMrOnPlatform(
+	repoPath: string,
+	ticketKey: string,
+	branchName: string,
+	baseBranch: string,
+	mrTitle: string,
+	mrBody: string,
+): Promise<string> {
 	const platform = await detectGitPlatform(repoPath);
 
 	if (platform === 'github') {
 		console.log(chalk.gray('  Creating GitHub PR...'));
 
-		// 1. Try gh CLI
 		try {
 			const result = await execFileAsync(
 				'gh',
@@ -573,27 +676,25 @@ export async function pushBranchAndCreateMR(
 			const prUrl = result.stdout.trim();
 			const prNum = parseInt(prUrl.split('/').pop() ?? '', 10);
 			if (prNum) await setCached(prCacheKey(ticketKey), { number: prNum, url: prUrl, platform: 'github' });
-			console.log(chalk.green(`  PR created: ${prUrl}`));
+			console.log(chalk.green(`  ✓ PR created: ${prUrl}`));
 			return prUrl;
 		} catch (err: unknown) {
 			if (!isEnoent(err)) throw err;
 			console.log(chalk.gray('  gh CLI not found, trying GitHub API...'));
 		}
 
-		// 2. Try GitHub API
 		try {
 			const repoId = await parseRepoIdentifier(repoPath);
 			const prUrl = await createGitHubPR(repoId, branchName, baseBranch, mrTitle, mrBody);
 			const prNum = parseInt(prUrl.split('/').pop() ?? '', 10);
 			if (prNum) await setCached(prCacheKey(ticketKey), { number: prNum, url: prUrl, platform: 'github' });
-			console.log(chalk.green(`  PR created via API: ${prUrl}`));
+			console.log(chalk.green(`  ✓ PR created via API: ${prUrl}`));
 			return prUrl;
 		} catch (apiErr: unknown) {
 			const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
 			console.log(chalk.yellow(`  GitHub API failed: ${msg}`));
 		}
 
-		// 3. Fall back to manual URL
 		const ghManualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'github');
 		console.log(chalk.cyan(`  Create PR manually: ${ghManualUrl}`));
 		return ghManualUrl;
@@ -602,7 +703,6 @@ export async function pushBranchAndCreateMR(
 	if (platform === 'gitlab') {
 		console.log(chalk.gray('  Creating GitLab MR...'));
 
-		// 1. Try glab CLI
 		try {
 			const result = await execFileAsync(
 				'glab',
@@ -612,27 +712,25 @@ export async function pushBranchAndCreateMR(
 			const mrUrl = result.stdout.trim();
 			const mrNum = parseInt(mrUrl.split('/').pop() ?? '', 10);
 			if (mrNum) await setCached(prCacheKey(ticketKey), { number: mrNum, url: mrUrl, platform: 'gitlab' });
-			console.log(chalk.green(`  MR created: ${mrUrl}`));
+			console.log(chalk.green(`  ✓ MR created: ${mrUrl}`));
 			return mrUrl;
 		} catch (err: unknown) {
 			if (!isEnoent(err)) throw err;
 			console.log(chalk.gray('  glab CLI not found, trying GitLab API...'));
 		}
 
-		// 2. Try GitLab API
 		try {
 			const repoId = await parseRepoIdentifier(repoPath);
 			const mrUrl = await createGitLabMR(repoId, branchName, baseBranch, mrTitle, mrBody);
 			const mrNum = parseInt(mrUrl.split('/').pop() ?? '', 10);
 			if (mrNum) await setCached(prCacheKey(ticketKey), { number: mrNum, url: mrUrl, platform: 'gitlab' });
-			console.log(chalk.green(`  MR created via API: ${mrUrl}`));
+			console.log(chalk.green(`  ✓ MR created via API: ${mrUrl}`));
 			return mrUrl;
 		} catch (apiErr: unknown) {
 			const msg = apiErr instanceof Error ? apiErr.message : String(apiErr);
 			console.log(chalk.yellow(`  GitLab API failed: ${msg}`));
 		}
 
-		// 3. Fall back to manual URL
 		const glManualUrl = await buildManualMrUrl(repoPath, branchName, baseBranch, 'gitlab');
 		console.log(chalk.cyan(`  Create MR manually: ${glManualUrl}`));
 		return glManualUrl;
