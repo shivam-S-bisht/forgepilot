@@ -530,6 +530,69 @@ export async function fetchUnresolvedReviewComments(
 	return [];
 }
 
+type MrConventions = {
+	titleFormat?: string;
+	descriptionTemplate?: string;
+	baseBranch?: string;
+};
+
+async function extractMrConventions(repoPath: string, ticketKey: string, ticketTitle: string, commitBullets: string, jiraUrl: string): Promise<MrConventions | null> {
+	const contributing = await readContributing(repoPath);
+	if (!contributing) return null;
+
+	const agent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+	const prompt = [
+		'You are analyzing a CONTRIBUTING.md / AGENTS.md file to extract MR/PR conventions.',
+		'',
+		'Given the contributing guidelines below, extract any conventions for:',
+		'1. MR/PR title format (e.g., "[TICKET] title", "TICKET: title", "feat(scope): description")',
+		'2. MR/PR description template or required sections',
+		'3. Target/base branch convention (e.g., "development", "main", "develop")',
+		'',
+		'Then apply those conventions to generate the actual MR title and description for this ticket.',
+		'',
+		`Ticket Key: ${ticketKey}`,
+		`Ticket Title: ${ticketTitle}`,
+		`Jira URL: ${jiraUrl}`,
+		`Commits:\n${commitBullets}`,
+		'',
+		'Output ONLY valid JSON (no markdown fences, no explanation):',
+		'{',
+		'  "titleFormat": "<the formatted MR title applying the convention>",',
+		'  "descriptionTemplate": "<the formatted MR description applying the convention, use \\n for newlines>",',
+		'  "baseBranch": "<target branch if specified, or null>"',
+		'}',
+		'',
+		'If the contributing file does not mention MR/PR conventions, return: {"titleFormat":null,"descriptionTemplate":null,"baseBranch":null}',
+		'',
+		'--- CONTRIBUTING GUIDELINES ---',
+		contributing.slice(0, 6000),
+		'--- END ---',
+	].join('\n');
+
+	try {
+		let stdout = '';
+		if (agent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
+		} else if (agent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
+		} else {
+			return null;
+		}
+
+		const trimmed = stdout.trim();
+		const firstBrace = trimmed.indexOf('{');
+		const lastBrace = trimmed.lastIndexOf('}');
+		if (firstBrace < 0 || lastBrace <= firstBrace) return null;
+
+		const parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)) as MrConventions;
+		const hasValues = parsed.titleFormat || parsed.descriptionTemplate || parsed.baseBranch;
+		return hasValues ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
 export async function pushBranchAndCreateMR(
 	repoPath: string,
 	ticketKey: string,
@@ -582,7 +645,6 @@ export async function pushBranchAndCreateMR(
 	console.log(chalk.green(`  ✓ Pushed ${branchName} to origin.`));
 
 	// --- MR/PR preview and edit ---
-	let mrTitle = `${ticketKey.toUpperCase()} ${ticketTitle}`;
 	const commitBullets = commitLog
 		.split('\n')
 		.map((line) => line.trim())
@@ -590,18 +652,39 @@ export async function pushBranchAndCreateMR(
 		.map((line) => `- ${line}`)
 		.join('\n');
 
+	console.log(chalk.gray('  Checking CONTRIBUTING.md for MR conventions...'));
+	const conventions = await extractMrConventions(repoPath, ticketKey, ticketTitle, commitBullets, jiraUrl);
+
+	let mrTitle = `${ticketKey.toUpperCase()} ${ticketTitle}`;
+	let mrDescription = `${commitBullets}\n\n${jiraUrl}`;
+
+	if (conventions) {
+		console.log(chalk.green('  ✓ MR conventions loaded from CONTRIBUTING.md'));
+		if (conventions.titleFormat) {
+			mrTitle = conventions.titleFormat;
+			console.log(chalk.gray(`    Title format applied: ${mrTitle}`));
+		}
+		if (conventions.descriptionTemplate) {
+			mrDescription = conventions.descriptionTemplate;
+			console.log(chalk.gray('    Description template applied.'));
+		}
+		if (conventions.baseBranch) {
+			baseBranch = conventions.baseBranch;
+			console.log(chalk.gray(`    Base branch set to: ${baseBranch}`));
+		}
+	} else {
+		console.log(chalk.gray('  No MR conventions found. Using defaults.'));
+	}
+
 	const maxReviewRounds = 5;
 	for (let round = 0; round < maxReviewRounds; round++) {
-		const mrBody = `${commitBullets}\n\n${jiraUrl}`;
-
 		console.log(chalk.bold.cyan('\n  MR/PR Preview:'));
 		console.log(chalk.white(`    Title:  ${mrTitle}`));
 		console.log(chalk.white(`    Base:   ${baseBranch}`));
 		console.log(chalk.white(`    Description:`));
-		for (const line of commitBullets.split('\n')) {
+		for (const line of mrDescription.split('\n')) {
 			console.log(chalk.gray(`      ${line}`));
 		}
-		if (jiraUrl) console.log(chalk.gray(`      ${jiraUrl}`));
 		console.log('');
 
 		const choice = await askUserChoice('Proceed with MR/PR creation?', [
@@ -621,7 +704,7 @@ export async function pushBranchAndCreateMR(
 		}
 
 		if (choice === 'create') {
-			return await createMrOnPlatform(repoPath, ticketKey, branchName, baseBranch, mrTitle, mrBody);
+			return await createMrOnPlatform(repoPath, ticketKey, branchName, baseBranch, mrTitle, mrDescription);
 		}
 
 		if (choice === 'title') {
@@ -650,8 +733,7 @@ export async function pushBranchAndCreateMR(
 		}
 	}
 
-	const finalBody = `${commitBullets}\n\n${jiraUrl}`;
-	return await createMrOnPlatform(repoPath, ticketKey, branchName, baseBranch, mrTitle, finalBody);
+	return await createMrOnPlatform(repoPath, ticketKey, branchName, baseBranch, mrTitle, mrDescription);
 }
 
 async function createMrOnPlatform(
