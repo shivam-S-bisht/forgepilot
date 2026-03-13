@@ -46,6 +46,9 @@ export function startAxonWatch(repoPath: string): ChildProcess | null {
 	if (!hasAxonGraph(repoPath)) return null;
 	if (!isAxonAvailable()) return null;
 
+	const repoName = path.basename(repoPath);
+	console.log(chalk.cyan(`  Initializing Axon knowledge graph for ${repoName}...`));
+
 	try {
 		const child = spawn('axon', ['watch', '.'], {
 			cwd: repoPath,
@@ -53,10 +56,10 @@ export function startAxonWatch(repoPath: string): ChildProcess | null {
 			detached: true,
 		});
 		child.unref();
-		console.log(chalk.gray('  Axon watch started in background.'));
+		console.log(chalk.green(`  ✓ Axon watch mode activated (PID: ${child.pid})`));
 		return child;
 	} catch {
-		console.log(chalk.yellow('  Warning: could not start axon watch.'));
+		console.log(chalk.yellow('  ⚠ Could not start Axon watch — structural reasoning will use static graph only.'));
 		return null;
 	}
 }
@@ -72,6 +75,7 @@ export function stopAxonWatch(child: ChildProcess | null): void {
 			// Already exited.
 		}
 	}
+	console.log(chalk.gray('  Axon watch stopped.'));
 }
 
 export function getAxonPromptHint(repoPath: string): string {
@@ -117,6 +121,11 @@ export function getAxonPromptHint(repoPath: string): string {
 		'Goal:',
 		'Act like a staff engineer who understands the entire architecture, not just visible files.',
 		'',
+		'CRITICAL: You MUST use Axon tools (axon_context, axon_impact, axon_query) BEFORE making any code changes.',
+		'Do NOT skip Axon lookups — they are mandatory, not optional.',
+		'If you proceed without consulting the Axon graph first, your changes may break downstream dependencies.',
+		'Every todo item implementation should begin with an axon_context or axon_query call to understand the affected area.',
+		'',
 		'--- END AXON PROTOCOL ---',
 	].join('\n');
 }
@@ -124,8 +133,8 @@ export function getAxonPromptHint(repoPath: string): string {
 export function logAxonStatus(repoPath: string): void {
 	if (!hasAxonGraph(repoPath)) return;
 	if (isAxonAvailable()) {
-		console.log(chalk.gray('  Axon graph found at .axon/ — hint added to agent prompt.'));
+		console.log(chalk.green('  ✓ Axon knowledge graph detected — structural reasoning protocol injected into agent prompt.'));
 	} else {
-		console.log(chalk.yellow('  Axon graph found at .axon/ but axon binary not available. Set FORGEPILOT_AXON_VENV_PATH.'));
+		console.log(chalk.yellow('  ⚠ Axon graph found at .axon/ but axon binary not available. Set FORGEPILOT_AXON_VENV_PATH.'));
 	}
 }
