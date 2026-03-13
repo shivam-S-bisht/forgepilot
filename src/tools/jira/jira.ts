@@ -91,6 +91,30 @@ export async function fetchIssueDetail(issueKey: string): Promise<JiraIssueDetai
 	return jiraFetch<JiraIssueDetail>(`/rest/api/3/issue/${encodeURIComponent(issueKey)}`);
 }
 
+export async function createJiraIssue(
+	projectKey: string,
+	summary: string,
+	description: string,
+): Promise<JiraIssueDetail> {
+	const body = {
+		fields: {
+			project: { key: projectKey },
+			summary,
+			description: {
+				type: 'doc',
+				version: 1,
+				content: [{ type: 'paragraph', content: [{ type: 'text', text: description }] }],
+			},
+			issuetype: { name: 'Task' },
+		},
+	};
+	const created = await jiraFetch<{ key: string }>('/rest/api/3/issue', {
+		method: 'POST',
+		body: JSON.stringify(body),
+	});
+	return fetchIssueDetail(created.key);
+}
+
 export async function transitionIssueToInProgress(detail: JiraIssueDetail): Promise<void> {
 	const currentStatus = detail.fields.status?.name;
 	if (currentStatus && currentStatus.toLowerCase().includes('progress')) return;

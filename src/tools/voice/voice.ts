@@ -8,14 +8,14 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 
 import { matchCommand, VOICE_COMMANDS, type MatchedCommand } from './voice-commands.js';
-import { fetchTicketsByScope, fetchTicketsByJql } from '../jira/jira.js';
+import { fetchTicketsByScope, fetchTicketsByJql, createJiraIssue } from '../jira/jira.js';
 import type { TicketScope } from '../jira/jira.js';
 import { fetchIssueDetail, transitionIssueToInProgress } from '../jira/jira.js';
 import { getDescriptionText, getAcceptanceCriteria, getJiraBrowseUrl } from '../jira/jira-text.js';
 import { gitExec, findOpenPullRequest, fetchUnresolvedReviewComments, pushBranchAndCreateMR, prepareRepoForWork } from '../git/git.js';
-import { parseTodoProgress, getAvailableAgentOptions, launchAgentForRepos, launchMultipleTickets, resolveAgentOptionById } from '../../core/agents.js';
+import { parseTodoProgress, getAvailableAgentOptions, launchAgentForRepos, launchMultipleTickets, launchAgentForCustomTask, resolveAgentOptionById } from '../../core/agents.js';
 import { getCached } from '../../core/cache.js';
-import { resolveRepoPathsAuto } from '../../core/repo.js';
+import { resolveRepoPathsAuto, scanLocalRepos } from '../../core/repo.js';
 import {
 	checkVoiceDependencies,
 	initRecognizer,
@@ -107,6 +107,7 @@ Available actions (use the handler name exactly):
 - transitionTicket: Move a ticket to In Progress. Params: ticket_key
 - commitChanges: Stage and commit all changes. Params: ticket_key
 - prepareBranch: Create/checkout a feature branch. Params: ticket_key
+- customTask: Work on a custom task without a Jira ticket. Params: description (a brief summary of the task the user wants to work on)
 - showMore: Show next page of ticket list. No params.
 - showHelp: List available commands. No params.
 - stopVoice: Exit voice mode. No params.
@@ -740,6 +741,110 @@ function handleShowMore(_params: Record<string, string>, state: VoiceState): voi
 	displayTicketPage(state);
 }
 
+async function handleCustomTask(params: Record<string, string>, state: VoiceState): Promise<void> {
+	let description = params.description?.trim();
+
+	if (!description) {
+		printAndSpeak('What would you like to work on? Describe the task.');
+		const spoken = await askVoice('Task description:');
+		if (!spoken) {
+			printAndSpeak('No description provided. Cancelled.');
+			return;
+		}
+		description = spoken;
+	}
+
+	printAndSpeak(`Got it: "${description}". Let me find your repos.`);
+
+	const rootDir = await getCached<string>('rootDir') ?? process.env.FORGEPILOT_ROOT_DIR?.trim();
+	if (!rootDir) {
+		printAndSpeak('No root directory set. Please set FORGEPILOT_ROOT_DIR or run the CLI to configure it.');
+		return;
+	}
+	const resolvedRoot = rootDir.replace(/^~/, process.env.HOME ?? '~');
+
+	const localRepos = await scanLocalRepos(resolvedRoot);
+	if (!localRepos.length) {
+		printAndSpeak('No repositories found in your root directory.');
+		return;
+	}
+
+	const repoOptions: VoiceOption[] = localRepos.map((r) => ({
+		id: r,
+		label: path.basename(r),
+	}));
+
+	const selectedRepos: string[] = [];
+	printAndSpeak('Which repository should I use? You can add more after.');
+
+	while (true) {
+		const remaining = repoOptions.filter((r) => !selectedRepos.includes(r.id));
+		if (!remaining.length) break;
+
+		const chosen = await askVoice(
+			selectedRepos.length ? 'Add another repo? Say the name or say "done".' : 'Select a repo:',
+			[...remaining, { id: '__done__', label: 'done' }],
+		);
+		if (!chosen || chosen === '__done__') break;
+		selectedRepos.push(chosen);
+		printAndSpeak(`Added ${path.basename(chosen)}.`);
+	}
+
+	if (!selectedRepos.length) {
+		printAndSpeak('No repos selected. Cancelled.');
+		return;
+	}
+
+	state.lastRepoPath = selectedRepos[0];
+	const repoMap = new Map(selectedRepos.map((r) => [path.basename(r), r]));
+
+	const agentOption = await resolveAgent(state);
+	if (!agentOption) return;
+
+	const branchSlug = description
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-|-$/g, '')
+		.slice(0, 50);
+	const branchName = `custom/${branchSlug}`;
+
+	const createTicketOptions: VoiceOption[] = [
+		{ id: 'yes', label: 'yes' },
+		{ id: 'no', label: 'no' },
+	];
+	const wantTicket = await askVoice('Would you like to create a Jira ticket for this task?', createTicketOptions);
+
+	if (wantTicket === 'yes') {
+		const projectKey = process.env.FORGEPILOT_JIRA_PROJECT_KEY?.trim();
+		if (!projectKey) {
+			printAndSpeak('FORGEPILOT_JIRA_PROJECT_KEY is not set. Skipping Jira ticket creation.');
+		} else {
+			try {
+				printAndSpeak('Creating a Jira ticket...');
+				const detail = await createJiraIssue(projectKey, description, description);
+				printAndSpeak(`Created ${detail.key}. Now launching the agent.`);
+				state.lastTicketKey = detail.key;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				printAndSpeak(`Could not create ticket: ${msg.slice(0, 80)}. Continuing without one.`);
+			}
+		}
+	}
+
+	printAndSpeak(`Launching ${agentOption.label} for custom task. This may take a while.`);
+
+	if (process.stdin.isTTY) process.stdin.setRawMode(false);
+	try {
+		await launchAgentForCustomTask(description, branchName, agentOption, repoMap);
+		printAndSpeak(`${agentOption.label} finished the custom task.`);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		printAndSpeak(`Agent failed: ${msg.slice(0, 100)}`);
+	} finally {
+		if (process.stdin.isTTY) process.stdin.setRawMode(true);
+	}
+}
+
 function handleShowHelp(): void {
 	console.log(chalk.bold('\n  Available voice commands:\n'));
 	for (const cmd of VOICE_COMMANDS) {
@@ -764,6 +869,7 @@ const COMMAND_HANDLERS: Record<string, (params: Record<string, string>, state: V
 	searchTickets: handleSearchTickets,
 	commitChanges: handleCommitChanges,
 	prepareBranch: handlePrepareBranch,
+	customTask: handleCustomTask,
 	showMore: handleShowMore,
 	showHelp: handleShowHelp,
 	stopVoice: () => {},

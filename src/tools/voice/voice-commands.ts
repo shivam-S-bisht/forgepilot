@@ -344,6 +344,27 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
 		handler: 'prepareBranch',
 	},
 	{
+		id: 'custom_task',
+		phrases: [
+			'work on something',
+			'custom task',
+			'start a task',
+			'work on a task',
+			'new task',
+			'create a task',
+			'start custom work',
+			'work on this',
+			'i want to work on',
+			'lets build',
+			'lets create',
+			'lets implement',
+			'build something',
+			'implement something',
+		],
+		description: 'Provide a custom task description to work on (no Jira ticket needed)',
+		handler: 'customTask',
+	},
+	{
 		id: 'show_more',
 		phrases: [
 			'show more',

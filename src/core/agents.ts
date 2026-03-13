@@ -10,7 +10,7 @@ import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
 import { fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
-import { buildWorkPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria } from '../tools/jira/jira-text.js';
+import { buildWorkPrompt, buildCustomTaskPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
@@ -20,6 +20,35 @@ import { askUser, askUserChoice } from './ask.js';
 import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
 
 const execFileAsync = promisify(execFile);
+
+type MultiRepoBranchStrategy = 'same-branch' | 'separate-branches';
+
+async function promptMultiRepoBranchStrategy(repoPaths: string[], branchHint: string): Promise<MultiRepoBranchStrategy> {
+	if (repoPaths.length <= 1) return 'same-branch';
+
+	const repoNames = repoPaths.map((p) => path.basename(p));
+	console.log(chalk.cyan(`\n  Working across ${repoPaths.length} repos: ${repoNames.join(', ')}`));
+
+	if (isVoiceModeActive()) {
+		printAndSpeak(`You're working on ${repoPaths.length} repositories. Same branch name across all and push separately?`);
+	}
+
+	const choice = await askUserChoice(
+		`Branch strategy for ${repoPaths.length} repos:`,
+		[
+			{ id: 'same-branch', label: `Same branch "${branchHint}" across all repos, push each separately` },
+			{ id: 'separate-branches', label: 'Let each repo decide its own branch independently' },
+		],
+	);
+
+	if (choice === 'separate-branches') {
+		console.log(chalk.gray('  Each repo will manage its own branch.'));
+		return 'separate-branches';
+	}
+
+	console.log(chalk.green(`  ✓ Using branch "${branchHint}" across all repos. Each repo will be pushed separately.`));
+	return 'same-branch';
+}
 
 // ---------------------------------------------------------------------------
 // Checkpoint types and helpers
@@ -717,6 +746,10 @@ export async function launchAgentForRepos(
 		}
 	}
 
+	if (paths.length > 1) {
+		await promptMultiRepoBranchStrategy(paths, detail.key.toUpperCase());
+	}
+
 	const figmaSection = await fetchFigmaDesignContext(detail);
 	const jiraUrl = getJiraBrowseUrl(detail);
 
@@ -957,6 +990,51 @@ export async function launchMultipleTickets(
 	await Promise.allSettled(tasks);
 
 	return statuses;
+}
+
+export async function launchAgentForCustomTask(
+	taskDescription: string,
+	branchName: string,
+	agentOption: WorkAgentOption,
+	repoPaths: Map<string, string>,
+): Promise<void> {
+	const paths = [...repoPaths.values()];
+	const contributing = await readContributing(paths[0]);
+
+	if (paths.length > 1) {
+		await promptMultiRepoBranchStrategy(paths, branchName);
+	}
+
+	await notifySlackStatus(`ForgePilot started ${agentOption.label} for custom task "${branchName}" across ${paths.length} repo(s).`);
+
+	for (const repoPath of paths) {
+		let axonChild: ReturnType<typeof startAxonWatch> = null;
+		try {
+			console.log(chalk.bold(`\nPreparing ${repoPath} for ${branchName}...`));
+			const effectivePath = await prepareRepoForWork(repoPath, branchName);
+
+			const repoContributing = repoPath === paths[0] ? contributing : await readContributing(effectivePath);
+			const axonHint = getAxonPromptHint(effectivePath);
+			logAxonStatus(effectivePath);
+			axonChild = startAxonWatch(effectivePath);
+
+			const prompt = buildCustomTaskPrompt(taskDescription, branchName, repoContributing ?? '', axonHint);
+
+			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath}...`));
+			await dispatchAgent(agentOption, prompt, effectivePath, '');
+
+			console.log(chalk.green(`\n  ✓ ${agentOption.label} finished in ${effectivePath}.`));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.log(chalk.red(`  ✗ Agent failed in ${repoPath}: ${message}`));
+			await notifySlackStatus(`ForgePilot error for custom task "${branchName}" in ${repoPath}: ${message}`);
+			throw error;
+		} finally {
+			stopAxonWatch(axonChild);
+		}
+	}
+
+	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for custom task "${branchName}" successfully.`);
 }
 
 export async function cleanupWorktrees(statuses: TicketRunStatus[]): Promise<void> {

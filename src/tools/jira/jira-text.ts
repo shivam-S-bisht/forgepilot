@@ -401,3 +401,81 @@ export function buildWorkPrompt(
 
 	return sections.join('\n');
 }
+
+export function buildCustomTaskPrompt(
+	taskDescription: string,
+	branchName: string,
+	contributing = '',
+	axonHint = '',
+): string {
+	const todoFile = `.forgepilot-todos-${branchName.toUpperCase()}.md`;
+	const sections: string[] = [];
+
+	sections.push(
+		'=== ROLE ===',
+		'You are a senior software engineer implementing a custom task.',
+		'You write production-quality code that follows existing patterns in the codebase.',
+		'You think before you code, explore the repo first, and verify your work.',
+		'',
+	);
+
+	sections.push(
+		'=== TASK ===',
+		taskDescription,
+		'',
+	);
+
+	sections.push(
+		'=== WORKFLOW ===',
+		'',
+		`1. UNDERSTAND — Read the task description carefully.`,
+		'',
+		'2. EXPLORE — Browse the codebase to understand the relevant areas.',
+		'',
+		`3. PLAN — Create ${todoFile} with a checklist of implementation tasks.`,
+		'',
+		`4. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
+		'   a. Complete the task.',
+		`   b. Mark it done in ${todoFile} by changing "- [ ]" to "- [x]".`,
+		`   c. Commit the code changes (do NOT include ${todoFile} in the commit).`,
+		`      Use commit message format: ${branchName} <concise description of what was done>`,
+		'   d. Move to the next item.',
+		'',
+		'5. VERIFY — After all items are done, run linters, type checks, and tests if the repo has them.',
+		'   Fix any errors you introduced. Ensure the build passes.',
+		'',
+		`6. CLEANUP — Delete ${todoFile} if it exists. Do NOT commit it.`,
+		'',
+	);
+
+	sections.push(
+		'=== CONSTRAINTS ===',
+		`- Commit after completing each todo item. Use the format: ${branchName} <concise description>. Do NOT include ${todoFile} in any commit. Do NOT push to remote.`,
+		'- Do NOT add Co-authored-by, Signed-off-by, or any other trailers to commit messages.',
+		'- Do NOT delete or rename files unless the task explicitly requires it.',
+		'- Match existing code style: indentation, naming, file organization, and patterns.',
+		'- Prefer editing existing files over creating new ones.',
+		'- Handle errors gracefully — no silent failures, no empty catch blocks without reason.',
+		'- If the repo has tests, add or update tests for your changes.',
+		'- Do NOT add unnecessary comments that just narrate what the code does.',
+		'',
+	);
+
+	if (contributing) {
+		sections.push(
+			'=== CONTRIBUTING GUIDELINES ===',
+			'Follow these guidelines strictly. They take precedence over general best practices.',
+			'',
+			contributing,
+			'',
+			'=== END CONTRIBUTING GUIDELINES ===',
+			'',
+		);
+	}
+
+	if (axonHint) {
+		sections.push(axonHint, '');
+	}
+
+	return sections.join('\n');
+}
