@@ -364,10 +364,14 @@ async function runCopilotForTicket(
 	prompt: string,
 	repoPath: string,
 	autonomous: boolean,
+	additionalDirs: string[] = [],
 ): Promise<void> {
 	const args = autonomous
 		? ['-p', prompt, '--autopilot', '--allow-all-tools', '--allow-all-paths', '--add-dir', repoPath]
 		: ['-i', prompt, '--add-dir', repoPath];
+	for (const dir of additionalDirs) {
+		args.push('--add-dir', dir);
+	}
 	await runCommandInteractive('copilot', args, 'Copilot', repoPath);
 }
 
@@ -385,8 +389,11 @@ async function runCursorForTicket(prompt: string, repoPath: string): Promise<voi
 	await runCommandInteractive('cursor', args, 'Cursor Agent', repoPath);
 }
 
-async function runClaudeCodeForTicket(prompt: string, repoPath: string, interactive: boolean): Promise<void> {
+async function runClaudeCodeForTicket(prompt: string, repoPath: string, interactive: boolean, additionalDirs: string[] = []): Promise<void> {
 	const args = interactive ? [prompt] : ['-p', prompt, '--add-dir', repoPath];
+	for (const dir of additionalDirs) {
+		args.push('--add-dir', dir);
+	}
 	await runCommandInteractive('claude', args, 'Claude Code', repoPath);
 }
 
@@ -514,19 +521,20 @@ async function dispatchAgent(
 	prompt: string,
 	repoPath: string,
 	jiraUrl: string,
+	additionalDirs: string[] = [],
 ): Promise<void> {
 	switch (agentOption.id) {
 		case 'copilot-autonomous':
-			await runCopilotForTicket(prompt, repoPath, true);
+			await runCopilotForTicket(prompt, repoPath, true, additionalDirs);
 			break;
 		case 'copilot-interactive':
-			await runCopilotForTicket(prompt, repoPath, false);
+			await runCopilotForTicket(prompt, repoPath, false, additionalDirs);
 			break;
 		case 'claude-code-autonomous':
-			await runClaudeCodeForTicket(prompt, repoPath, false);
+			await runClaudeCodeForTicket(prompt, repoPath, false, additionalDirs);
 			break;
 		case 'claude-code-interactive':
-			await runClaudeCodeForTicket(prompt, repoPath, true);
+			await runClaudeCodeForTicket(prompt, repoPath, true, additionalDirs);
 			break;
 		case 'cursor-autonomous':
 			await runCursorForTicket(prompt, repoPath);
@@ -685,6 +693,14 @@ export async function launchAgentForRepos(
 	const firstRepoContributing = await readContributing(paths[0]);
 	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
 	const clarifications = formatClarifications(preflight);
+	const referenceRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
+
+	if (referenceRepoPaths.length) {
+		console.log(chalk.green(`  ✓ ${referenceRepoPaths.length} reference repo(s) will be shared with the agent:`));
+		for (const rp of referenceRepoPaths) {
+			console.log(chalk.gray(`    → ${rp}`));
+		}
+	}
 
 	const figmaSection = await fetchFigmaDesignContext(detail);
 	const jiraUrl = getJiraBrowseUrl(detail);
@@ -761,7 +777,7 @@ export async function launchAgentForRepos(
 				});
 
 				console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ${isResume ? '(resuming from checkpoint) ' : ''}...`));
-				await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+				await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
 
 				const questions = await readQuestionsFile(effectivePath, detail.key);
 				if (!questions) break;
@@ -844,6 +860,7 @@ export async function launchMultipleTickets(
 			const firstRepoContributing = await readContributing(paths[0]);
 			const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
 			const clarifications = formatClarifications(preflight);
+			const refRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
 			const figmaSection = await fetchFigmaDesignContext(detail);
 			const jiraUrl = getJiraBrowseUrl(detail);
 
@@ -887,7 +904,7 @@ export async function launchMultipleTickets(
 							lastUpdatedAt: new Date().toISOString(),
 						});
 
-						await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl);
+						await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, refRepoPaths);
 
 						const questions = await readQuestionsFile(effectivePath, detail.key);
 						if (!questions) break;

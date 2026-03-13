@@ -23,6 +23,7 @@ export type PreflightResult = {
 	concerns: PreflightConcern[];
 	answers: Map<string, string>;
 	historyForPrompt: string;
+	referenceRepoPaths: string[];
 };
 
 type TicketHistoryEntry = {
@@ -225,17 +226,17 @@ function normalizeConcerns(payload: unknown): PreflightConcern[] {
 	});
 }
 
-async function resolveLocalRepoStatus(detail: JiraIssueDetail): Promise<string> {
+async function resolveLocalRepoStatus(detail: JiraIssueDetail): Promise<{ status: string; localPaths: string[] }> {
 	try {
 		const { repoUrls } = toTicketContext(detail);
-		if (!repoUrls.length) return 'no repo URLs in ticket';
+		if (!repoUrls.length) return { status: 'no repo URLs in ticket', localPaths: [] };
 
 		const rootDir = (await getCached<string>('rootDir')) ?? process.env.FORGEPILOT_ROOT_DIR?.replace(/^~/, process.env.HOME ?? '~');
-		if (!rootDir) return 'root directory not configured';
+		if (!rootDir) return { status: 'root directory not configured', localPaths: [] };
 
-		const localPaths = await scanLocalRepos(rootDir);
+		const scannedPaths = await scanLocalRepos(rootDir);
 		const remoteIndex = new Map<string, string>();
-		for (const localPath of localPaths) {
+		for (const localPath of scannedPaths) {
 			const remotes = await getRemoteUrls(localPath);
 			for (const remote of remotes) {
 				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
@@ -243,21 +244,23 @@ async function resolveLocalRepoStatus(detail: JiraIssueDetail): Promise<string> 
 		}
 
 		const results: string[] = [];
+		const matchedPaths: string[] = [];
 		for (const url of repoUrls) {
 			const normalized = url.replace(/\.git$/, '').replace(/\/$/, '').toLowerCase();
 			let found = false;
 			for (const [remote, localPath] of remoteIndex) {
 				if (remote.toLowerCase().includes(normalized) || normalized.includes(remote.toLowerCase())) {
 					results.push(`${url} → available locally at ${localPath}`);
+					matchedPaths.push(localPath);
 					found = true;
 					break;
 				}
 			}
 			if (!found) results.push(`${url} → NOT found locally`);
 		}
-		return results.join('; ');
+		return { status: results.join('; '), localPaths: matchedPaths };
 	} catch {
-		return 'could not check';
+		return { status: 'could not check', localPaths: [] };
 	}
 }
 
@@ -265,8 +268,8 @@ async function analyzeTicketWithAi(
 	detail: JiraIssueDetail,
 	hasContributing: boolean,
 	historyForPrompt: string,
+	localRepoStatus: string,
 ): Promise<PreflightConcern[] | null> {
-	const localRepoStatus = await resolveLocalRepoStatus(detail);
 	const prompt = buildAiPreflightPrompt(detail, hasContributing, historyForPrompt, localRepoStatus);
 	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
 
@@ -388,7 +391,8 @@ export async function runPreflightChecks(
 	const priorHistory = await readTicketHistory(detail.key);
 	const historyForPrompt = formatHistoryForPrompt(priorHistory);
 	const priorAnswerIndex = buildPriorAnswerIndex(priorHistory);
-	const aiConcerns = await analyzeTicketWithAi(detail, hasContributing, historyForPrompt);
+	const { status: localRepoStatusText, localPaths: referenceRepoPaths } = await resolveLocalRepoStatus(detail);
+	const aiConcerns = await analyzeTicketWithAi(detail, hasContributing, historyForPrompt, localRepoStatusText);
 	const concerns = aiConcerns ?? [];
 	const answers = new Map<string, string>();
 	const concernsToAsk: PreflightConcern[] = [];
@@ -403,7 +407,7 @@ export async function runPreflightChecks(
 			concerns: [],
 			answers: [],
 		});
-		return { concerns, answers, historyForPrompt };
+		return { concerns, answers, historyForPrompt, referenceRepoPaths };
 	}
 
 	console.log(chalk.gray('  Preflight source: AI reviewer'));
@@ -484,7 +488,7 @@ export async function runPreflightChecks(
 	});
 
 	const updatedHistory = await readTicketHistory(detail.key);
-	return { concerns, answers, historyForPrompt: formatHistoryForPrompt(updatedHistory) };
+	return { concerns, answers, historyForPrompt: formatHistoryForPrompt(updatedHistory), referenceRepoPaths };
 }
 
 export function formatClarifications(result: PreflightResult): string {
