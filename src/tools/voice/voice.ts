@@ -478,13 +478,15 @@ async function handlePushAndCreatePR(params: Record<string, string>, state: Voic
 	printAndSpeak(`Pushing branch and creating PR for ${key}...`);
 	try {
 		let jiraUrl = '';
+		let ticketTitle = key;
 		try {
 			const detail = await fetchIssueDetail(key);
 			jiraUrl = getJiraBrowseUrl(detail);
+			ticketTitle = String(detail.fields.summary ?? key);
 		} catch {
 			// Non-critical
 		}
-		const url = await pushBranchAndCreateMR(repoPath, key, key, jiraUrl);
+		const url = await pushBranchAndCreateMR(repoPath, key, ticketTitle, jiraUrl);
 		printAndSpeak(url ? `PR created: ${url}` : 'Branch pushed, but no PR URL returned.');
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);

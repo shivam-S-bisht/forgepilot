@@ -550,7 +550,13 @@ export async function pushBranchAndCreateMR(
 	}
 
 	const mrTitle = `${ticketKey.toUpperCase()} ${ticketTitle}`;
-	const mrBody = `${commitLog}\n\n${jiraUrl}`;
+	const commitBullets = commitLog
+		.split('\n')
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.map((line) => `- ${line}`)
+		.join('\n');
+	const mrBody = `${commitBullets}\n\n${jiraUrl}`;
 
 	const platform = await detectGitPlatform(repoPath);
 
