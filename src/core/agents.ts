@@ -10,13 +10,14 @@ import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
 import { fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
-import { buildWorkPrompt, getJiraBrowseUrl } from '../tools/jira/jira-text.js';
+import { buildWorkPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
 import { isSlackFullFlowEnabled, notifySlackStatus } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
 import { askUser, askUserChoice } from './ask.js';
+import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -554,6 +555,126 @@ async function dispatchAgent(
 	}
 }
 
+async function generateTodoPlan(
+	detail: JiraIssueDetail,
+	contributing: string,
+	clarifications: string,
+	modifications?: string,
+): Promise<string[] | null> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+
+	const prompt = [
+		'You are a senior software engineer planning work for a Jira ticket.',
+		'Generate a markdown checklist of implementation tasks.',
+		'',
+		'Output requirements:',
+		'- Return ONLY a markdown checklist (no explanation, no JSON, no code fences).',
+		'- Format: "- [ ] Task description" (one per line).',
+		'- Break work into small, logical, independently committable units.',
+		'- Order tasks by dependency (foundational work first).',
+		'- Include setup, implementation, tests, and cleanup steps as appropriate.',
+		'- Max 15 items.',
+		'',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
+		'',
+		`Description:\n${description.slice(0, 6000)}`,
+		'',
+		`Acceptance Criteria:\n${ac.slice(0, 4000)}`,
+		contributing ? `\nContributing Guidelines:\n${contributing.slice(0, 2000)}` : '',
+		clarifications ? `\nUser Clarifications:\n${clarifications.slice(0, 2000)}` : '',
+		modifications ? `\nUser requested modifications:\n${modifications}` : '',
+	].filter(Boolean).join('\n');
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else {
+			return null;
+		}
+
+		const items = stdout
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.startsWith('- [ ]'))
+			.map((line) => line.replace(/^- \[ \]\s*/, '').trim())
+			.filter(Boolean);
+
+		return items.length > 0 ? items : null;
+	} catch {
+		return null;
+	}
+}
+
+async function reviewTodoPlan(
+	items: string[],
+	detail: JiraIssueDetail,
+	contributing: string,
+	clarifications: string,
+): Promise<{ approved: string[]; action: 'approve' | 'skip' }> {
+	const maxRounds = 5;
+
+	for (let round = 0; round < maxRounds; round++) {
+		console.log(chalk.bold.cyan(`\n  📋 Proposed plan for ${detail.key}:\n`));
+		for (let i = 0; i < items.length; i++) {
+			console.log(chalk.white(`  ${i + 1}. ${items[i]}`));
+		}
+		console.log('');
+
+		if (isVoiceModeActive()) {
+			printAndSpeak(`${items.length} tasks planned. Review and approve, modify, or restart.`);
+		}
+
+		const choice = await askUserChoice('What would you like to do?', [
+			{ id: 'approve', label: 'Looks good — start coding' },
+			{ id: 'modify', label: 'Modify the plan — tell me what to change' },
+			{ id: 'restart', label: 'Start over — re-analyze from scratch' },
+			{ id: 'skip', label: 'Skip plan review — let the agent decide' },
+		]);
+
+		if (choice === 'approve') {
+			return { approved: items, action: 'approve' };
+		}
+
+		if (choice === 'skip') {
+			return { approved: [], action: 'skip' };
+		}
+
+		if (choice === 'modify') {
+			const modifications = await askUser(chalk.cyan('  What should be changed? '));
+			if (!modifications) continue;
+
+			console.log(chalk.gray('  Regenerating plan with your modifications...'));
+			const updated = await generateTodoPlan(detail, contributing, clarifications, modifications);
+			if (updated) {
+				items = updated;
+			} else {
+				console.log(chalk.yellow('  Could not regenerate. Showing original plan.'));
+			}
+			continue;
+		}
+
+		if (choice === 'restart') {
+			console.log(chalk.gray('  Re-analyzing ticket from scratch...'));
+			const fresh = await generateTodoPlan(detail, contributing, clarifications);
+			if (fresh) {
+				items = fresh;
+			} else {
+				console.log(chalk.yellow('  Could not regenerate. Showing original plan.'));
+			}
+			continue;
+		}
+	}
+
+	return { approved: items, action: 'approve' };
+}
+
 export async function launchAgentForRepos(
 	detail: JiraIssueDetail,
 	agentOption: WorkAgentOption,
@@ -567,6 +688,21 @@ export async function launchAgentForRepos(
 
 	const figmaSection = await fetchFigmaDesignContext(detail);
 	const jiraUrl = getJiraBrowseUrl(detail);
+
+	let preApprovedPlan = false;
+	let approvedTodoItems: string[] = [];
+
+	console.log(chalk.gray('\n  Generating implementation plan...'));
+	const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications);
+	if (planItems) {
+		const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
+		if (result.action === 'approve') {
+			approvedTodoItems = result.approved;
+			preApprovedPlan = true;
+		}
+	} else {
+		console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+	}
 
 	await transitionIssueToInProgress(detail);
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
@@ -585,6 +721,18 @@ export async function launchAgentForRepos(
 				({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
 			}
 
+			if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
+				const todoPath = todoFilePath(effectivePath, detail.key);
+				const todoContent = [
+					`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
+					'',
+					...approvedTodoItems.map((item) => `- [ ] ${item}`),
+					'',
+				].join('\n');
+				await fs.writeFile(todoPath, todoContent, 'utf8');
+				console.log(chalk.green(`  ✓ Pre-approved plan written to ${path.basename(todoPath)}`));
+			}
+
 			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
 			if (contributing) {
 				console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${effectivePath}`));
@@ -596,10 +744,11 @@ export async function launchAgentForRepos(
 
 			let priorAnswers = '';
 			const maxQaRounds = 5;
+			const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
 
 			for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
 				const isResume = resumeMode && qaRound === 0;
-				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : []);
+				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
 
 				await saveCheckpoint(detail.key, {
 					ticketKey: detail.key,

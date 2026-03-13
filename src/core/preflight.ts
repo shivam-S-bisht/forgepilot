@@ -310,6 +310,43 @@ async function appendTicketHistory(
 	return history;
 }
 
+const QUESTION_STARTERS = /^\s*(what|how|why|which|can|should|is|does|do|will|would|could|where|when|who)\b/i;
+
+function looksLikeQuestion(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed) return false;
+	if (trimmed.endsWith('?')) return true;
+	if (QUESTION_STARTERS.test(trimmed)) return true;
+	return false;
+}
+
+async function clarifyWithAi(concern: PreflightConcern, userQuestion: string): Promise<string | null> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+	const prompt = [
+		'The user is reviewing a preflight concern before starting work on a Jira ticket.',
+		'They asked a follow-up question instead of providing an answer.',
+		'Provide a concise, helpful clarification (2-3 sentences max). Do NOT return JSON.',
+		'',
+		`Original concern: ${concern.message}`,
+		concern.hint ? `Hint: ${concern.hint}` : '',
+		`User's question: ${userQuestion}`,
+	].filter(Boolean).join('\n');
+
+	try {
+		if (preflightAgent === 'copilot') {
+			const { stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 });
+			return stdout.trim() || null;
+		}
+		if (preflightAgent === 'cursor') {
+			const { stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 });
+			return stdout.trim() || null;
+		}
+	} catch {
+		return null;
+	}
+	return null;
+}
+
 async function askConcern(
 	concern: PreflightConcern,
 	ticketKey: string,
@@ -320,6 +357,26 @@ async function askConcern(
 		const answer = await askConcernViaSlack(concern, ticketKey, index, total);
 		return answer ?? '';
 	}
+
+	const maxClarifications = 3;
+	for (let round = 0; round < maxClarifications; round++) {
+		const answer = await askUser(chalk.cyan('    Your input (press Enter to skip): '));
+		if (!answer) return '';
+
+		if (!looksLikeQuestion(answer)) return answer;
+
+		console.log(chalk.gray('    Checking with AI for clarification...'));
+		const clarification = await clarifyWithAi(concern, answer);
+		if (clarification) {
+			console.log(chalk.white(`    💡 ${clarification}`));
+			if (isVoiceModeActive()) {
+				printAndSpeak(clarification);
+			}
+		} else {
+			console.log(chalk.gray('    Could not get clarification. Please provide your answer or press Enter to skip.'));
+		}
+	}
+
 	return askUser(chalk.cyan('    Your input (press Enter to skip): '));
 }
 

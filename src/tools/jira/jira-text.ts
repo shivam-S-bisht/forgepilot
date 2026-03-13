@@ -197,6 +197,7 @@ export function buildWorkPrompt(
 	priorAnswers = '',
 	resumeFromCheckpoint = false,
 	reviewComments: ReviewCommentForPrompt[] = [],
+	preApprovedPlan = false,
 ): string {
 	const title = detail.fields.summary ?? '(no title)';
 	const status = detail.fields.status?.name ?? 'Unknown';
@@ -368,6 +369,19 @@ export function buildWorkPrompt(
 			`Do NOT recreate ${todoFile} — it already contains the review items.`,
 			'Skip steps 1-3 of the WORKFLOW (UNDERSTAND, EXPLORE, PLAN) and go directly to step 5 (IMPLEMENT).',
 			'=== END REVIEW FEEDBACK ===',
+			'',
+		);
+	}
+
+	if (preApprovedPlan) {
+		sections.push(
+			'=== PRE-APPROVED PLAN ===',
+			`Your todo file (${todoFile}) has been pre-populated with a user-approved plan.`,
+			'The user has reviewed and approved this plan before you started.',
+			'Skip steps 1-3 of the WORKFLOW (UNDERSTAND, EXPLORE, PLAN) and go directly to step 5 (IMPLEMENT).',
+			`Do NOT recreate or restructure ${todoFile} — the user has already approved it.`,
+			'You may add sub-tasks within existing items if needed, but do not remove or reorder approved items.',
+			'=== END PRE-APPROVED PLAN ===',
 			'',
 		);
 	}
