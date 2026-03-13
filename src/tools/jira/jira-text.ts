@@ -301,6 +301,7 @@ export function buildWorkPrompt(
 	sections.push(
 		'=== CONSTRAINTS ===',
 		`- Commit after completing each todo item. Use the format: ${detail.key} <concise description>. Do NOT include ${todoFile}, ${questionsFile}, or ${answersFile} in any commit. Do NOT push to remote.`,
+		'- Do NOT add Co-authored-by, Signed-off-by, or any other trailers to commit messages. Keep commits clean with only the ticket key and description.',
 		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
 		'- Prefer editing existing files over creating new ones.',
