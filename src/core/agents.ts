@@ -2,7 +2,6 @@ import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
@@ -15,9 +14,9 @@ import { buildWorkPrompt, getJiraBrowseUrl } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
-import { askQuestionViaSlack, isSlackFullFlowEnabled, notifySlackStatus, postAndWaitForSelection, shouldUseSlackQa } from '../tools/slack/slack.js';
-import type { SlackPickOption } from '../tools/slack/slack.js';
+import { isSlackFullFlowEnabled, notifySlackStatus } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
+import { askUser, askUserChoice } from './ask.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -103,25 +102,8 @@ async function promptForResume(
 		{ id: 'show-progress', label: 'Show current progress — view completed/pending items, then decide' },
 	];
 
-	if (isSlackFullFlowEnabled()) {
-		console.log(chalk.yellow(`\n  ${header}${agentInfo}`));
-		console.log(chalk.gray('  Asking via Slack...'));
-		const slackOptions: SlackPickOption[] = options.map((o) => ({ id: o.id, label: o.label }));
-		const [selected] = await postAndWaitForSelection(`${header}${agentInfo}`, slackOptions);
-		return selected as ResumeChoice;
-	}
-
-	console.log(chalk.yellow(`\n  ${header}${agentInfo}`));
-	console.log('');
-	for (let i = 0; i < options.length; i++) {
-		console.log(chalk.cyan(`  ${i + 1}. ${options[i].label}`));
-	}
-	console.log('');
-
-	const answer = await askLine(chalk.cyan('  Choose (1-4): '));
-	const num = parseInt(answer, 10);
-	if (num >= 1 && num <= 4) return options[num - 1].id;
-	return 'resume';
+	const selected = await askUserChoice(`${header}${agentInfo}`, options);
+	return (selected as ResumeChoice) || 'resume';
 }
 
 function displayTodoProgress(ticketKey: string, progress: TodoProgress): void {
@@ -242,22 +224,10 @@ async function handleReviewDetection(
 		{ id: 'ignore', label: 'Ignore — continue normally (checkpoint/fresh)' },
 	];
 
-	let choice = 'address';
-	if (isSlackFullFlowEnabled()) {
-		const slackOptions: SlackPickOption[] = options.map((o) => ({ id: o.id, label: o.label }));
-		const [selected] = await postAndWaitForSelection(
-			`Found ${comments.length} unresolved review comment(s) on ${pr.platform === 'github' ? 'PR' : 'MR'} #${pr.number} for *${ticketKey}*:`,
-			slackOptions,
-		);
-		choice = selected;
-	} else {
-		for (let i = 0; i < options.length; i++) {
-			console.log(chalk.cyan(`  ${i + 1}. ${options[i].label}`));
-		}
-		const answer = await askLine(chalk.cyan('  Choose (1-2): '));
-		const num = parseInt(answer, 10);
-		if (num === 2) choice = 'ignore';
-	}
+	const choice = await askUserChoice(
+		`Found ${comments.length} unresolved review comment(s) on ${pr.platform === 'github' ? 'PR' : 'MR'} #${pr.number} for *${ticketKey}*:`,
+		options,
+	);
 
 	if (choice === 'ignore') {
 		console.log(chalk.gray('  Ignoring review comments. Proceeding normally.'));
@@ -300,16 +270,6 @@ function answersFilePath(repoPath: string, ticketKey: string): string {
 	return path.join(repoPath, `.forgepilot-answers-${ticketKey.toUpperCase()}.md`);
 }
 
-function askLine(prompt: string): Promise<string> {
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	return new Promise((resolve) =>
-		rl.question(prompt, (answer) => {
-			rl.close();
-			resolve(answer.trim());
-		}),
-	);
-}
-
 async function readQuestionsFile(repoPath: string, ticketKey: string): Promise<string[] | null> {
 	const filePath = questionsFilePath(repoPath, ticketKey);
 	if (!existsSync(filePath)) return null;
@@ -347,15 +307,7 @@ async function routeQuestions(
 		const question = questions[i];
 		console.log(chalk.cyan(`  [${i + 1}/${questions.length}] ${question}`));
 
-		let answer = '';
-		if (shouldUseSlackQa()) {
-			const slackAnswer = await askQuestionViaSlack(question, ticketKey, i + 1, questions.length);
-			answer = slackAnswer ?? '';
-		} else {
-			if (process.stdin.isTTY) process.stdin.setRawMode(false);
-			answer = await askLine(chalk.cyan('    Your answer (press Enter to skip): '));
-			if (process.stdin.isTTY) process.stdin.setRawMode(true);
-		}
+		let answer = await askUser(chalk.cyan('    Your answer (press Enter to skip): '));
 
 		if (answer) {
 			console.log(chalk.green(`    ✓ Noted.\n`));

@@ -221,6 +221,42 @@ function drainKeypressesInternal(ms: number): Promise<void> {
 	});
 }
 
+export type InputModeResult =
+	| { mode: 'voice' }
+	| { mode: 'keyboard'; firstChar: string }
+	| { mode: 'quit' };
+
+export function waitForInputMode(): Promise<InputModeResult> {
+	return new Promise((resolve) => {
+		const onKeypress = (ch: string | undefined, key: readline.Key) => {
+			if (key.ctrl && key.name === 'c') {
+				cleanup();
+				resolve({ mode: 'quit' });
+				return;
+			}
+			if (key.name === 'space') {
+				cleanup();
+				resolve({ mode: 'voice' });
+				return;
+			}
+			if (ch && ch.length === 1 && !key.ctrl && !key.meta) {
+				cleanup();
+				resolve({ mode: 'keyboard', firstChar: ch });
+				return;
+			}
+			if (key.name === 'return') {
+				cleanup();
+				resolve({ mode: 'keyboard', firstChar: '' });
+				return;
+			}
+		};
+		const cleanup = () => {
+			process.stdin.removeListener('keypress', onKeypress);
+		};
+		process.stdin.on('keypress', onKeypress);
+	});
+}
+
 const NUMBER_WORDS: Record<string, number> = {
 	one: 1, two: 2, three: 3, four: 4, five: 5,
 	six: 6, seven: 7, eight: 8, nine: 9, ten: 10,

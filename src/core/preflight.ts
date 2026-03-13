@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
@@ -8,6 +7,7 @@ import { commentsText, getAcceptanceCriteria, getDescriptionText, linkedIssuesTe
 import { extractRepoLabels } from './repo.js';
 import { askConcernViaSlack, shouldUseSlackQa } from '../tools/slack/slack.js';
 import type { JiraIssueDetail } from './types.js';
+import { askUser } from './ask.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,16 +71,6 @@ function buildPriorAnswerIndex(history: TicketHistoryRecord): Map<string, string
 	for (const [k, v] of byConcernId) merged.set(`id::${k}`, v);
 	for (const [k, v] of byMessageKey) merged.set(`msg::${k}`, v);
 	return merged;
-}
-
-function askLine(prompt: string): Promise<string> {
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	return new Promise((resolve) =>
-		rl.question(prompt, (answer) => {
-			rl.close();
-			resolve(answer.trim());
-		}),
-	);
 }
 
 function trimForPrompt(value: string, max = 5000): string {
@@ -285,7 +275,7 @@ async function askConcern(
 		const answer = await askConcernViaSlack(concern, ticketKey, index, total);
 		return answer ?? '';
 	}
-	return askLine(chalk.cyan('    Your input (press Enter to skip): '));
+	return askUser(chalk.cyan('    Your input (press Enter to skip): '));
 }
 
 export async function runPreflightChecks(

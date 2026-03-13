@@ -11,6 +11,7 @@ import { postAndWaitForSelection } from '../tools/slack/slack.js';
 import type { SlackPickOption } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, RepoLabel, TicketRepoResolution } from './types.js';
 import { renderRepoPicker } from './ui.js';
+import { askUser } from './ask.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -75,16 +76,6 @@ export async function getRemoteUrls(repoPath: string): Promise<string[]> {
 	}
 }
 
-function askLine(prompt: string): Promise<string> {
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	return new Promise((resolve) =>
-		rl.question(prompt, (answer) => {
-			rl.close();
-			resolve(answer.trim());
-		}),
-	);
-}
-
 function pickReposInteractive(repos: string[], ticketKey: string): Promise<string[]> {
 	return new Promise((resolve) => {
 		let cursorIndex = 0;
@@ -140,7 +131,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 
 	let rootDir = await getCached<string>('rootDir');
 	if (!rootDir) {
-		const input = await askLine('Root directory containing your repos (e.g. ~/dev): ');
+		const input = await askUser('Root directory containing your repos (e.g. ~/dev): ');
 		if (!input) throw new Error('Root directory is required.');
 		rootDir = path.resolve(input.replace(/^~/, process.env.HOME ?? '~'));
 		if (!existsSync(rootDir)) throw new Error(`Directory does not exist: ${rootDir}`);
@@ -170,7 +161,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		}
 
 		if (!localRepoPaths.length) {
-			const manualPath = await askLine('No repos found. Enter the local repo path to work in: ');
+			const manualPath = await askUser('No repos found. Enter the local repo path to work in: ');
 			if (!manualPath) throw new Error('No repo path provided.');
 			const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
 			if (!existsSync(path.join(resolved, '.git'))) throw new Error(`Not a git repository: ${resolved}`);
@@ -259,7 +250,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 				}
 			}
 		} else {
-			const manualPath = await askLine('No local repos found. Enter the repo path manually: ');
+			const manualPath = await askUser('No local repos found. Enter the repo path manually: ');
 			if (manualPath) {
 				const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
 				if (existsSync(path.join(resolved, '.git'))) {
