@@ -889,7 +889,37 @@ export async function launchMultipleTickets(
 	}
 	onStatusChange(statuses);
 
-	const tasks = details.map(async (detail, i) => {
+	const hasWorktreeNeeds = [...resolutions.values()].some((r) => r.needsWorktree.size > 0);
+	let useSingleBranch = false;
+
+	if (hasWorktreeNeeds) {
+		const ticketKeys = details.map((d) => d.key).join(', ');
+		console.log(chalk.cyan(`\n  Multiple tickets (${ticketKeys}) share the same repo(s).`));
+
+		if (isVoiceModeActive()) {
+			printAndSpeak('These tickets share repos. Should all work go into a single branch, or separate branches?');
+		}
+
+		const choice = await askUserChoice(
+			'Branch strategy for shared repos:',
+			[
+				{ id: 'single', label: `Single branch — all work on "${details[0].key.toUpperCase()}", run sequentially` },
+				{ id: 'separate', label: 'Separate branches per ticket — run in parallel with worktrees' },
+			],
+		);
+
+		if (choice === 'single') {
+			useSingleBranch = true;
+			for (const resolution of resolutions.values()) {
+				resolution.needsWorktree.clear();
+			}
+			console.log(chalk.green(`  ✓ All work will go into branch "${details[0].key.toUpperCase()}", running sequentially.`));
+		} else {
+			console.log(chalk.green('  ✓ Each ticket gets its own branch. Running in parallel with worktrees.'));
+		}
+	}
+
+	const runTicket = async (detail: JiraIssueDetail, i: number) => {
 		const resolution = resolutions.get(detail.key);
 		if (!resolution) {
 			statuses[i].status = 'failed';
@@ -914,12 +944,14 @@ export async function launchMultipleTickets(
 
 			await transitionIssueToInProgress(detail);
 
+			const effectiveBranchKey = useSingleBranch ? details[0].key : detail.key;
+
 			for (const repoPath of paths) {
 				const useWorktree = resolution.needsWorktree.has(repoPath);
 				let axonChild: ReturnType<typeof startAxonWatch> = null;
 
 				try {
-					const effectivePath = await prepareRepoForWork(repoPath, detail.key, useWorktree, detail);
+					const effectivePath = await prepareRepoForWork(repoPath, effectiveBranchKey, useWorktree, detail);
 					if (useWorktree) worktreePaths.push(effectivePath);
 
 					const ticketTitle = String(detail.fields.summary ?? detail.key);
@@ -985,9 +1017,15 @@ export async function launchMultipleTickets(
 		}
 
 		onStatusChange(statuses);
-	});
+	};
 
-	await Promise.allSettled(tasks);
+	if (useSingleBranch) {
+		for (const [i, detail] of details.entries()) {
+			await runTicket(detail, i);
+		}
+	} else {
+		await Promise.allSettled(details.map((detail, i) => runTicket(detail, i)));
+	}
 
 	return statuses;
 }
