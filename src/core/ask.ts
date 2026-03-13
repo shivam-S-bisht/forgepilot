@@ -101,8 +101,7 @@ export async function askUserChoice(prompt: string, options: AskOption[]): Promi
 				if (opt) console.log(chalk.green(`  → Selected: ${opt.label}`));
 				return matched;
 			}
-			printAndSpeak(`I didn't match that to an option. Defaulting to first.`);
-			return options[0].id;
+			return `__unmatched__:${transcript}`;
 		}
 		const answer = await askLine(chalk.cyan(`  Choose (1-${options.length}): `), input.firstChar);
 		const num = parseInt(answer, 10);

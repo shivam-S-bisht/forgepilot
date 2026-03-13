@@ -646,6 +646,21 @@ async function reviewTodoPlan(
 			{ id: 'skip', label: 'Skip plan review — let the agent decide' },
 		]);
 
+		if (choice.startsWith('__unmatched__:')) {
+			const modifications = choice.slice('__unmatched__:'.length);
+			console.log(chalk.gray('  Treating your response as a plan modification...'));
+			if (isVoiceModeActive()) {
+				printAndSpeak('Updating the plan with your feedback.');
+			}
+			const updated = await generateTodoPlan(detail, contributing, clarifications, modifications);
+			if (updated) {
+				items = updated;
+			} else {
+				console.log(chalk.yellow('  Could not regenerate. Showing original plan.'));
+			}
+			continue;
+		}
+
 		if (choice === 'approve') {
 			return { approved: items, action: 'approve' };
 		}
