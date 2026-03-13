@@ -4,10 +4,11 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
 import { commentsText, getAcceptanceCriteria, getDescriptionText, linkedIssuesText } from '../tools/jira/jira-text.js';
-import { extractRepoLabels } from './repo.js';
+import { extractRepoLabels, scanLocalRepos, getRemoteUrls } from './repo.js';
 import { askConcernViaSlack, shouldUseSlackQa } from '../tools/slack/slack.js';
 import type { JiraIssueDetail } from './types.js';
 import { askUser } from './ask.js';
+import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -127,7 +128,12 @@ function formatHistoryForPrompt(history: TicketHistoryRecord | null, maxEntries 
 	return lines.join('\n');
 }
 
-function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolean, historyForPrompt: string): string {
+function buildAiPreflightPrompt(
+	detail: JiraIssueDetail,
+	hasContributing: boolean,
+	historyForPrompt: string,
+	localRepoStatus: string,
+): string {
 	const { title, status, description, ac, comments, links, repoUrls } = toTicketContext(detail);
 
 	return [
@@ -142,12 +148,14 @@ function buildAiPreflightPrompt(detail: JiraIssueDetail, hasContributing: boolea
 		'- Include concern(s) if description, AC, and comments conflict.',
 		'- Include concern(s) for missing repos, missing coding conventions, unclear scope, missing test expectations.',
 		'- If status indicates done/closed/resolved but new work may still be requested, still raise a warning.',
+		'- Do NOT raise concerns about repo access, cloning, or permissions if the repo is already available locally (see LocalRepoStatus below).',
 		'',
 		`Ticket Key: ${detail.key}`,
 		`Title: ${title}`,
 		`Status: ${status}`,
 		`HasContributingOrAgents: ${hasContributing ? 'yes' : 'no'}`,
 		`RepoUrlsInDescription: ${repoUrls.length ? repoUrls.join(', ') : '(none)'}`,
+		`LocalRepoStatus: ${localRepoStatus || 'not checked'}`,
 		'',
 		`Description:\n${trimForPrompt(description, 6000)}`,
 		'',
@@ -217,12 +225,49 @@ function normalizeConcerns(payload: unknown): PreflightConcern[] {
 	});
 }
 
+async function resolveLocalRepoStatus(detail: JiraIssueDetail): Promise<string> {
+	try {
+		const { repoUrls } = toTicketContext(detail);
+		if (!repoUrls.length) return 'no repo URLs in ticket';
+
+		const rootDir = (await getCached<string>('rootDir')) ?? process.env.FORGEPILOT_ROOT_DIR?.replace(/^~/, process.env.HOME ?? '~');
+		if (!rootDir) return 'root directory not configured';
+
+		const localPaths = await scanLocalRepos(rootDir);
+		const remoteIndex = new Map<string, string>();
+		for (const localPath of localPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+			}
+		}
+
+		const results: string[] = [];
+		for (const url of repoUrls) {
+			const normalized = url.replace(/\.git$/, '').replace(/\/$/, '').toLowerCase();
+			let found = false;
+			for (const [remote, localPath] of remoteIndex) {
+				if (remote.toLowerCase().includes(normalized) || normalized.includes(remote.toLowerCase())) {
+					results.push(`${url} → available locally at ${localPath}`);
+					found = true;
+					break;
+				}
+			}
+			if (!found) results.push(`${url} → NOT found locally`);
+		}
+		return results.join('; ');
+	} catch {
+		return 'could not check';
+	}
+}
+
 async function analyzeTicketWithAi(
 	detail: JiraIssueDetail,
 	hasContributing: boolean,
 	historyForPrompt: string,
 ): Promise<PreflightConcern[] | null> {
-	const prompt = buildAiPreflightPrompt(detail, hasContributing, historyForPrompt);
+	const localRepoStatus = await resolveLocalRepoStatus(detail);
+	const prompt = buildAiPreflightPrompt(detail, hasContributing, historyForPrompt, localRepoStatus);
 	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
 
 	try {
@@ -332,6 +377,10 @@ export async function runPreflightChecks(
 		console.log(chalk.gray(`  Reused ${reusedAnswers} prior answer(s) from cache for similar concerns.`));
 	}
 
+	if (isVoiceModeActive() && concernsToAsk.length > 0) {
+		printAndSpeak(`${concernsToAsk.length} clarification${concernsToAsk.length === 1 ? '' : 's'} needed before starting work.`);
+	}
+
 	for (let i = 0; i < concernsToAsk.length; i++) {
 		const concern = concernsToAsk[i];
 		const icon = concern.severity === 'warning' ? chalk.yellow('⚠') : chalk.cyan('?');
@@ -339,6 +388,9 @@ export async function runPreflightChecks(
 
 		if (concern.hint) {
 			console.log(chalk.gray(`    Hint: ${concern.hint}`));
+		}
+		if (isVoiceModeActive()) {
+			printAndSpeak(concern.message);
 		}
 
 		const answer = await askConcern(concern, detail.key, i + 1, concernsToAsk.length);

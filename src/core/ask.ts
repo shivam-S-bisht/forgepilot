@@ -50,7 +50,7 @@ function matchTranscriptToOption(transcript: string, options: AskOption[]): stri
 	return null;
 }
 
-async function hybridInput(): Promise<InputModeResult> {
+async function detectInputMode(): Promise<InputModeResult> {
 	if (process.stdin.isTTY) process.stdin.setRawMode(true);
 	console.log(chalk.gray('  [Space] to speak, or start typing...'));
 	const result = await waitForInputMode();
@@ -60,10 +60,11 @@ async function hybridInput(): Promise<InputModeResult> {
 
 export async function askUser(prompt: string): Promise<string> {
 	if (isVoiceModeActive()) {
-		printAndSpeak(prompt);
-		const input = await hybridInput();
+		console.log(chalk.cyan(`  ${prompt}`));
+		const input = await detectInputMode();
 		if (input.mode === 'quit') return '';
 		if (input.mode === 'voice') {
+			printAndSpeak(prompt);
 			const transcript = await recordAndTranscribe();
 			return transcript ?? '';
 		}
@@ -81,17 +82,17 @@ export type AskOption = { id: string; label: string };
 
 export async function askUserChoice(prompt: string, options: AskOption[]): Promise<string> {
 	if (isVoiceModeActive()) {
-		printAndSpeak(prompt);
+		console.log(chalk.yellow(`\n  ${prompt}`));
 		console.log('');
 		for (let i = 0; i < options.length; i++) {
 			console.log(chalk.cyan(`  ${i + 1}. ${options[i].label}`));
 		}
 		console.log('');
-		speak(`Choose a number from 1 to ${options.length}.`);
 
-		const input = await hybridInput();
+		const input = await detectInputMode();
 		if (input.mode === 'quit') return options[0].id;
 		if (input.mode === 'voice') {
+			speak(prompt);
 			const transcript = await recordAndTranscribe();
 			if (!transcript) return options[0].id;
 			const matched = matchTranscriptToOption(transcript, options);
@@ -103,8 +104,7 @@ export async function askUserChoice(prompt: string, options: AskOption[]): Promi
 			printAndSpeak(`I didn't match that to an option. Defaulting to first.`);
 			return options[0].id;
 		}
-		const prefilled = input.firstChar;
-		const answer = await askLine(chalk.cyan(`  Choose (1-${options.length}): `), prefilled);
+		const answer = await askLine(chalk.cyan(`  Choose (1-${options.length}): `), input.firstChar);
 		const num = parseInt(answer, 10);
 		if (num >= 1 && num <= options.length) return options[num - 1].id;
 		return options[0].id;
