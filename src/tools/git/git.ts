@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from '../../core/cache.js';
 import { askUser, askUserChoice } from '../../core/ask.js';
+import type { JiraIssueDetail } from '../../core/types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -111,17 +112,107 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
 	}
 }
 
+type BugBranchStrategy = {
+	baseBranch: string;
+	skipNewBranch: boolean;
+	useTicketKey: string;
+};
+
+function isBugTicket(detail: JiraIssueDetail): boolean {
+	const issuetype = detail.fields.issuetype as { name?: string } | undefined;
+	const name = issuetype?.name?.toLowerCase() ?? '';
+	return name === 'bug' || name === 'defect';
+}
+
+function extractLinkedTicketKeys(detail: JiraIssueDetail): string[] {
+	const links = detail.fields.issuelinks ?? [];
+	const keys: string[] = [];
+	for (const link of links) {
+		const target = link.outwardIssue ?? link.inwardIssue;
+		if (target?.key) keys.push(target.key.toUpperCase());
+	}
+	return keys;
+}
+
+async function resolveBugBranchStrategy(
+	repoPath: string,
+	detail: JiraIssueDetail,
+	ticketKey: string,
+): Promise<BugBranchStrategy | null> {
+	if (!isBugTicket(detail)) return null;
+
+	const linkedKeys = extractLinkedTicketKeys(detail);
+	if (!linkedKeys.length) return null;
+
+	const existingBranches: string[] = [];
+	for (const key of linkedKeys) {
+		if (await branchExists(repoPath, key)) {
+			existingBranches.push(key);
+		}
+	}
+
+	if (!existingBranches.length) {
+		console.log(chalk.gray(`  Bug ticket detected. Linked tickets: ${linkedKeys.join(', ')} — none have local branches.`));
+		return null;
+	}
+
+	console.log(chalk.bold.yellow(`\n  Bug ticket detected with linked branch(es): ${existingBranches.join(', ')}`));
+
+	const options = [
+		...existingBranches.map((b) => ({
+			id: `branch-off-${b}`,
+			label: `Branch off from ${b} (create new ${ticketKey.toUpperCase()} branch)`,
+		})),
+		...existingBranches.map((b) => ({
+			id: `work-on-${b}`,
+			label: `Work directly on ${b} branch (no new branch for this bug)`,
+		})),
+		{ id: 'default', label: `Use default base branch (${getBaseBranch()})` },
+	];
+
+	const choice = await askUserChoice('How should this bug ticket be branched?', options);
+
+	if (choice.startsWith('__unmatched__:')) {
+		return null;
+	}
+
+	for (const b of existingBranches) {
+		if (choice === `branch-off-${b}`) {
+			return { baseBranch: b, skipNewBranch: false, useTicketKey: ticketKey };
+		}
+		if (choice === `work-on-${b}`) {
+			return { baseBranch: b, skipNewBranch: true, useTicketKey: b };
+		}
+	}
+
+	return null;
+}
+
 export async function prepareRepoForWork(
 	repoPath: string,
 	ticketKey: string,
 	useWorktree = false,
+	detail?: JiraIssueDetail,
 ): Promise<string> {
 	if (useWorktree) {
 		return createWorktree(repoPath, ticketKey);
 	}
 
-	const branchName = ticketKey.toUpperCase();
-	const baseBranch = getBaseBranch();
+	let branchName = ticketKey.toUpperCase();
+	let baseBranch = getBaseBranch();
+
+	if (detail) {
+		const bugStrategy = await resolveBugBranchStrategy(repoPath, detail, ticketKey);
+		if (bugStrategy) {
+			baseBranch = bugStrategy.baseBranch;
+			if (bugStrategy.skipNewBranch) {
+				branchName = bugStrategy.useTicketKey;
+				console.log(chalk.green(`  ✓ Will work directly on branch ${branchName}`));
+			} else {
+				console.log(chalk.green(`  ✓ Will create ${branchName} branching off from ${baseBranch}`));
+			}
+		}
+	}
 
 	console.log(chalk.gray(`  Checking for uncommitted changes in ${repoPath}...`));
 	const status = await gitExec(repoPath, ['status', '--porcelain']);

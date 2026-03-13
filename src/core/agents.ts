@@ -742,7 +742,7 @@ export async function launchAgentForRepos(
 		let axonChild: ReturnType<typeof startAxonWatch> = null;
 		try {
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
-			const effectivePath = await prepareRepoForWork(repoPath, detail.key);
+			const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
 
 			const ticketTitle = String(detail.fields.summary ?? detail.key);
 			const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
@@ -886,7 +886,7 @@ export async function launchMultipleTickets(
 				let axonChild: ReturnType<typeof startAxonWatch> = null;
 
 				try {
-					const effectivePath = await prepareRepoForWork(repoPath, detail.key, useWorktree);
+					const effectivePath = await prepareRepoForWork(repoPath, detail.key, useWorktree, detail);
 					if (useWorktree) worktreePaths.push(effectivePath);
 
 					const ticketTitle = String(detail.fields.summary ?? detail.key);

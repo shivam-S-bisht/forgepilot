@@ -11,7 +11,8 @@ import { postAndWaitForSelection } from '../tools/slack/slack.js';
 import type { SlackPickOption } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, RepoLabel, TicketRepoResolution } from './types.js';
 import { renderRepoPicker } from './ui.js';
-import { askUser } from './ask.js';
+import { askUser, askUserChoice } from './ask.js';
+import { isVoiceModeActive } from '../tools/voice/voice-input.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -76,6 +77,18 @@ export async function getRemoteUrls(repoPath: string): Promise<string[]> {
 	}
 }
 
+function findMatchingRepo(normalizedUrl: string, remoteIndex: Map<string, string>): string | undefined {
+	const exact = remoteIndex.get(normalizedUrl);
+	if (exact) return exact;
+
+	for (const [remote, localPath] of remoteIndex) {
+		if (remote.includes(normalizedUrl) || normalizedUrl.includes(remote)) {
+			return localPath;
+		}
+	}
+	return undefined;
+}
+
 function pickReposInteractive(repos: string[], ticketKey: string): Promise<string[]> {
 	return new Promise((resolve) => {
 		let cursorIndex = 0;
@@ -124,6 +137,38 @@ function pickReposInteractive(repos: string[], ticketKey: string): Promise<strin
 	});
 }
 
+async function pickReposVoice(repos: string[], ticketKey: string): Promise<string[]> {
+	const selected: string[] = [];
+
+	while (true) {
+		const remaining = repos.filter((r) => !selected.includes(r));
+		if (!remaining.length) break;
+
+		const options = remaining.map((r, i) => ({
+			id: String(i),
+			label: path.basename(r),
+		}));
+		options.push({ id: 'done', label: selected.length ? 'Done selecting' : 'Skip — no repos' });
+
+		const prompt = selected.length
+			? `Selected ${selected.length} repo(s). Add another for ${ticketKey}?`
+			: `Select a repo for ${ticketKey}:`;
+
+		const choice = await askUserChoice(prompt, options);
+
+		if (choice === 'done') break;
+		if (choice.startsWith('__unmatched__:')) break;
+
+		const idx = parseInt(choice, 10);
+		if (!isNaN(idx) && idx >= 0 && idx < remaining.length) {
+			selected.push(remaining[idx]);
+			console.log(chalk.green(`  ✓ Added: ${path.basename(remaining[idx])}`));
+		}
+	}
+
+	return selected;
+}
+
 export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise<Map<string, string>> {
 	const description = getDescriptionText(detail);
 	const ticketRepos = extractRepoLabels(description);
@@ -170,7 +215,9 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 			return repoMap;
 		}
 
-		const picked = await pickReposInteractive(localRepoPaths, detail.key);
+		const picked = isVoiceModeActive()
+			? await pickReposVoice(localRepoPaths, detail.key)
+			: await pickReposInteractive(localRepoPaths, detail.key);
 		if (!picked.length) throw new Error('No repos selected.');
 
 		await setCached(cacheKey, picked);
@@ -197,7 +244,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 
 	const missing: string[] = [];
 	for (const repo of ticketRepos) {
-		const localPath = remoteIndex.get(repo.normalizedUrl);
+		const localPath = findMatchingRepo(repo.normalizedUrl, remoteIndex);
 		if (localPath) {
 			repoMap.set(repo.normalizedUrl, localPath);
 			console.log(chalk.green(`  ✓ ${repo.label} → ${localPath}`));
@@ -239,7 +286,9 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 			const alreadyMatched = new Set(repoMap.values());
 			const unmatched = localRepoPaths.filter((p) => !alreadyMatched.has(p));
 			if (unmatched.length) {
-				const picked = await pickReposInteractive(unmatched, detail.key);
+				const picked = isVoiceModeActive()
+					? await pickReposVoice(unmatched, detail.key)
+					: await pickReposInteractive(unmatched, detail.key);
 				if (picked.length) {
 					await setCached(cacheKey, picked);
 					for (const p of picked) {
@@ -301,7 +350,7 @@ export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map
 	}
 
 	for (const repo of ticketRepos) {
-		const localPath = remoteIndex.get(repo.normalizedUrl);
+		const localPath = findMatchingRepo(repo.normalizedUrl, remoteIndex);
 		if (localPath) repoMap.set(repo.normalizedUrl, localPath);
 	}
 
@@ -333,7 +382,7 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 		}
 
 		for (const repo of ticketRepos) {
-			const localPath = remoteIndex.get(repo.normalizedUrl);
+			const localPath = findMatchingRepo(repo.normalizedUrl, remoteIndex);
 			if (localPath) {
 				repoMap.set(repo.normalizedUrl, localPath);
 				console.log(chalk.green(`  Auto-matched repo: ${repo.label} → ${localPath}`));
