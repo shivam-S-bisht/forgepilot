@@ -502,6 +502,7 @@ Voice mode uses AI to understand natural language. You don't need to memorize ex
 | "start working on CE-1234" | Resolve repos, pick agent, launch — fully automated |
 | "let's start working on the second one" | Start work using ordinal reference from last ticket list |
 | "start working on CE-124 and CE-3791" | Launch agents for multiple tickets in parallel |
+| "I want to work on adding dark mode" | Custom task — no Jira ticket needed, optionally creates one |
 | "prepare branch for CE-1234" | Create/checkout a feature branch |
 | "commit my changes" | Stage all + commit (speaks commit message prompt) |
 | "push and create PR" | Push branch and create MR/PR |
@@ -539,6 +540,49 @@ If the AI CLI is unavailable or times out (30s), ForgePilot falls back to keywor
 | `FORGEPILOT_VOICE_TTS` | TTS command for spoken feedback | `say` (macOS) |
 | `FORGEPILOT_DEFAULT_AGENT` | Skip agent picker when starting ticket work | *(voice prompt)* |
 | `FORGEPILOT_PREFLIGHT_AGENT` | AI CLI used for voice command parsing (`copilot` or `cursor`) | `copilot` |
+| `FORGEPILOT_JIRA_PROJECT_KEY` | Jira project key for creating tickets from custom tasks (e.g. `CE`) | *(skips ticket creation)* |
+
+#### Siri Shortcut ("Hey Siri, Start ForgePilot")
+
+You can launch voice mode hands-free using a macOS Siri Shortcut:
+
+1. Open the **Shortcuts** app (Spotlight → "Shortcuts")
+2. Click **+** to create a new shortcut and name it **"Start ForgePilot"**
+3. Add a **"Run Shell Script"** action with this script:
+
+**For Terminal.app:**
+
+```bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+osascript -e 'tell application "Terminal"
+  activate
+  do script "forgepilot --voice"
+end tell'
+```
+
+**For iTerm2:**
+
+```bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+osascript -e 'tell application "iTerm2"
+  activate
+  tell current window
+    create tab with default profile
+    tell current session
+      write text "forgepilot --voice"
+    end tell
+  end tell
+end tell'
+```
+
+4. Click **Play** to test — it should open a terminal and start voice mode
+5. Now say **"Hey Siri, Start ForgePilot"** to launch hands-free
+
+> **Tip:** The shortcut name is the Siri trigger phrase. Ensure "Listen for Hey Siri" is enabled in **System Settings → Siri & Spotlight**. If `forgepilot` is not found, replace it with the full path from `which forgepilot`.
 
 ### Fully Hands-Free Mode
 
