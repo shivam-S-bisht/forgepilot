@@ -2,12 +2,16 @@
 
 import readline from 'node:readline';
 import chalk from 'chalk';
-import { resolveAgentOptionById } from './src/core/agents.js';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { getAvailableAgentOptions, launchAgentForCustomTask, resolveAgentOptionById } from './src/core/agents.js';
+import { askUser, askUserChoice } from './src/core/ask.js';
 import { activateAxonVenv } from './src/tools/axon/axon.js';
 import { getCached, setCached } from './src/core/cache.js';
 import { runAutoMode, startInteractiveCli } from './src/core/cli.js';
-import { fetchBoards, fetchTicketsByScope } from './src/tools/jira/jira.js';
+import { createJiraIssue, fetchBoards, fetchTicketsByScope } from './src/tools/jira/jira.js';
 import type { TicketScope } from './src/tools/jira/jira.js';
+import { scanLocalRepos } from './src/core/repo.js';
 import { slackPickScope, startSlackCli } from './src/tools/slack/slack-cli.js';
 import { isSlackFullFlowEnabled } from './src/tools/slack/slack.js';
 import { renderScopePicker } from './src/core/ui.js';
@@ -115,6 +119,112 @@ function printActiveConfig() {
 	console.log();
 }
 
+async function runCustomTaskFlow(): Promise<void> {
+	const description = await askUser(chalk.cyan('Describe the task you want to work on: '));
+	if (!description.trim()) {
+		console.log(chalk.yellow('No description provided. Exiting.'));
+		return;
+	}
+
+	let rootDir = await getCached<string>('rootDir') ?? process.env.FORGEPILOT_ROOT_DIR?.trim();
+	if (!rootDir) {
+		const input = await askUser(chalk.cyan('Root directory containing your repos (e.g. ~/dev): '));
+		if (!input) {
+			console.log(chalk.yellow('Root directory is required.'));
+			return;
+		}
+		rootDir = path.resolve(input.replace(/^~/, process.env.HOME ?? '~'));
+		if (!existsSync(rootDir)) {
+			console.log(chalk.red(`Directory does not exist: ${rootDir}`));
+			return;
+		}
+		await setCached('rootDir', rootDir);
+	}
+	const resolvedRoot = rootDir.replace(/^~/, process.env.HOME ?? '~');
+
+	console.log(chalk.gray(`Scanning repos in ${resolvedRoot}...`));
+	const localRepos = await scanLocalRepos(resolvedRoot);
+	if (!localRepos.length) {
+		console.log(chalk.yellow('No repositories found in your root directory.'));
+		return;
+	}
+
+	const repoOptions = localRepos.map((r) => ({ id: r, label: path.basename(r) }));
+	const selectedRepos: string[] = [];
+
+	while (true) {
+		const remaining = repoOptions.filter((r) => !selectedRepos.includes(r.id));
+		if (!remaining.length) break;
+
+		const prompt = selectedRepos.length
+			? `Add another repo? (${selectedRepos.map((r) => path.basename(r)).join(', ')} selected)`
+			: 'Select a repository:';
+		const chosen = await askUserChoice(prompt, [
+			...remaining,
+			{ id: '__done__', label: selectedRepos.length ? 'Done — start with selected repos' : 'Cancel' },
+		]);
+		if (chosen === '__done__') break;
+		selectedRepos.push(chosen);
+		console.log(chalk.green(`  ✓ Added ${path.basename(chosen)}`));
+	}
+
+	if (!selectedRepos.length) {
+		console.log(chalk.yellow('No repos selected. Exiting.'));
+		return;
+	}
+
+	const defaultAgentId = getDefaultAgentId();
+	let agentOption = defaultAgentId ? resolveAgentOptionById(defaultAgentId) : undefined;
+
+	if (!agentOption) {
+		const agents = await getAvailableAgentOptions();
+		if (!agents.length) {
+			console.log(chalk.yellow('No AI agent CLIs found on your system.'));
+			return;
+		}
+		const agentChoices = agents.map((a) => ({ id: a.id, label: a.label }));
+		const chosenAgentId = await askUserChoice('Select an AI agent:', agentChoices);
+		agentOption = agents.find((a) => a.id === chosenAgentId);
+		if (!agentOption) return;
+	} else {
+		console.log(chalk.gray(`Using default agent: ${agentOption.label}`));
+	}
+
+	const branchSlug = description
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-|-$/g, '')
+		.slice(0, 50);
+	const branchName = `custom/${branchSlug}`;
+
+	const projectKey = process.env.FORGEPILOT_JIRA_PROJECT_KEY?.trim();
+	if (projectKey) {
+		const wantTicket = await askUserChoice('Create a Jira ticket for this task?', [
+			{ id: 'yes', label: 'Yes — create a ticket' },
+			{ id: 'no', label: 'No — work without a ticket' },
+		]);
+		if (wantTicket === 'yes') {
+			try {
+				console.log(chalk.gray('Creating Jira ticket...'));
+				const detail = await createJiraIssue(projectKey, description, description);
+				console.log(chalk.green(`  ✓ Created ${detail.key}`));
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				console.log(chalk.yellow(`  Could not create ticket: ${msg.slice(0, 80)}. Continuing without one.`));
+			}
+		}
+	}
+
+	const repoMap = new Map(selectedRepos.map((r) => [path.basename(r), r]));
+
+	console.log(chalk.bold(`\nLaunching ${agentOption.label} for custom task...`));
+	console.log(chalk.gray(`  Branch: ${branchName}`));
+	console.log(chalk.gray(`  Repos: ${selectedRepos.map((r) => path.basename(r)).join(', ')}`));
+
+	await launchAgentForCustomTask(description, branchName, agentOption, repoMap);
+	console.log(chalk.green('\nCustom task completed.'));
+}
+
 async function main() {
 	try {
 		activateAxonVenv();
@@ -128,6 +238,17 @@ async function main() {
 
 		const auto = isAutoMode();
 		const defaultAgentId = getDefaultAgentId();
+
+		if (!auto && !isSlackFullFlowEnabled()) {
+			const workMode = await askUserChoice('How would you like to start?', [
+				{ id: 'ticket', label: 'Work from a Jira ticket' },
+				{ id: 'custom', label: 'Work from a description (no ticket needed)' },
+			]);
+			if (workMode === 'custom') {
+				await runCustomTaskFlow();
+				return;
+			}
+		}
 
 		const envScope = getEnvScope();
 		const cachedScope = await getCached<TicketScope>('ticketScope');
