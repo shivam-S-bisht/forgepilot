@@ -380,6 +380,11 @@ async function runCommandInteractive(command: string, args: string[], toolName: 
 			reject(error);
 		});
 		child.on('exit', (code) => {
+			// After stdio: 'inherit' child exits, stdin may be paused/unref'd.
+			// Resume it so the Node.js event loop stays alive for the caller's keypress handlers.
+			if (process.stdin.readable) {
+				process.stdin.resume();
+			}
 			if (code === 0) {
 				resolve();
 				return;
@@ -919,6 +924,58 @@ export async function launchMultipleTickets(
 		}
 	}
 
+	type TicketPlanData = {
+		clarifications: string;
+		referenceRepoPaths: string[];
+		contributing: string | null;
+		figmaSection: string;
+		approvedTodoItems: string[];
+		preApprovedPlan: boolean;
+	};
+	const ticketPlans = new Map<string, TicketPlanData>();
+
+	console.log(chalk.bold.cyan(`\n  Reviewing plans for ${details.length} ticket(s)...\n`));
+
+	for (const detail of details) {
+		const resolution = resolutions.get(detail.key);
+		if (!resolution) continue;
+
+		const paths = [...resolution.repoPaths.values()];
+		const contributing = await readContributing(paths[0]);
+		const preflight = await runPreflightChecks(detail, !!contributing);
+		const clarifications = formatClarifications(preflight);
+		const refRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
+		const figmaSection = await fetchFigmaDesignContext(detail);
+
+		let approvedTodoItems: string[] = [];
+		let preApprovedPlan = false;
+
+		console.log(chalk.bold(`\n  ── ${detail.key}: ${detail.fields.summary ?? detail.key} ──`));
+		console.log(chalk.gray('  Generating implementation plan...'));
+
+		const planItems = await generateTodoPlan(detail, contributing ?? '', clarifications);
+		if (planItems) {
+			const result = await reviewTodoPlan(planItems, detail, contributing ?? '', clarifications);
+			if (result.action === 'approve') {
+				approvedTodoItems = result.approved;
+				preApprovedPlan = true;
+			}
+		} else {
+			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		}
+
+		ticketPlans.set(detail.key, {
+			clarifications,
+			referenceRepoPaths: refRepoPaths,
+			contributing,
+			figmaSection,
+			approvedTodoItems,
+			preApprovedPlan,
+		});
+	}
+
+	console.log(chalk.bold.green(`\n  ✓ All plans reviewed. Starting execution...\n`));
+
 	const runTicket = async (detail: JiraIssueDetail, i: number) => {
 		const resolution = resolutions.get(detail.key);
 		if (!resolution) {
@@ -933,13 +990,15 @@ export async function launchMultipleTickets(
 
 		const paths = [...resolution.repoPaths.values()];
 		const worktreePaths: string[] = [];
+		const planData = ticketPlans.get(detail.key);
+		const clarifications = planData?.clarifications ?? '';
+		const refRepoPaths = planData?.referenceRepoPaths ?? [];
+		const firstRepoContributing = planData?.contributing ?? null;
+		const figmaSection = planData?.figmaSection ?? '';
+		const preApprovedPlan = planData?.preApprovedPlan ?? false;
+		const approvedTodoItems = planData?.approvedTodoItems ?? [];
 
 		try {
-			const firstRepoContributing = await readContributing(paths[0]);
-			const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
-			const clarifications = formatClarifications(preflight);
-			const refRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
-			const figmaSection = await fetchFigmaDesignContext(detail);
 			const jiraUrl = getJiraBrowseUrl(detail);
 
 			await transitionIssueToInProgress(detail);
@@ -962,17 +1021,30 @@ export async function launchMultipleTickets(
 						({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
 					}
 
+					if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
+						const todoPath = todoFilePath(effectivePath, detail.key);
+						const todoContent = [
+							`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
+							'',
+							...approvedTodoItems.map((item) => `- [ ] ${item}`),
+							'',
+						].join('\n');
+						await fs.writeFile(todoPath, todoContent, 'utf8');
+						console.log(chalk.green(`  ✓ Pre-approved plan written to ${path.basename(todoPath)}`));
+					}
+
 					const contributing =
 						repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
 					const axonHint = getAxonPromptHint(effectivePath);
 					axonChild = startAxonWatch(effectivePath);
 
+					const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
 					let priorAnswers = '';
 					const maxQaRounds = 5;
 
 					for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
 						const isResume = resumeMode && qaRound === 0;
-						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : []);
+						const prompt = buildWorkPrompt(detail, contributing ?? undefined, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
 
 						await saveCheckpoint(detail.key, {
 							ticketKey: detail.key,
