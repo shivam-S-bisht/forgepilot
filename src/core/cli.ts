@@ -560,6 +560,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			return;
 		}
 
+		if (!tickets.length || loadingDetail || loadingMore || launchingAgent) return;
+
 		if (key.name === 'm') {
 			if (loadingMore) return;
 			loadingMore = true;
@@ -593,8 +595,6 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			redrawList();
 			return;
 		}
-
-		if (!tickets.length || loadingDetail || loadingMore || launchingAgent) return;
 
 		if (key.name === 'up') {
 			selectedIndex = selectedIndex === 0 ? tickets.length - 1 : selectedIndex - 1;
