@@ -185,6 +185,45 @@ async function handleCheckpointResume(
 	return { resumeMode: false };
 }
 
+type ExistingPlanChoice = 'continue' | 'modify' | 'fresh';
+
+async function handleExistingPlan(
+	ticketKey: string,
+	repoPaths: string[],
+): Promise<{ choice: ExistingPlanChoice; progress: TodoProgress | null }> {
+	for (const rp of repoPaths) {
+		const progress = await parseTodoProgress(rp, ticketKey);
+		if (!progress) continue;
+
+		displayTodoProgress(ticketKey, progress);
+
+		const checkpoint = await loadCheckpoint(ticketKey);
+		const agentInfo = checkpoint
+			? ` Last agent: ${checkpoint.agentLabel} (${new Date(checkpoint.lastUpdatedAt).toLocaleString()}).`
+			: '';
+
+		const choice = await askUserChoice(
+			`Existing plan found for ${ticketKey} — ${progress.completed}/${progress.total} tasks done.${agentInfo} What would you like to do?`,
+			[
+				{ id: 'continue', label: 'Continue with this plan — resume where it left off' },
+				{ id: 'modify', label: 'Modify the plan — tell me what to change' },
+				{ id: 'fresh', label: 'Start fresh — discard this plan and generate a new one' },
+			],
+		);
+
+		if (choice === 'modify' || choice === 'fresh') {
+			for (const p of repoPaths) {
+				const todoFile = todoFilePath(p, ticketKey);
+				try { await fs.unlink(todoFile); } catch { /* ignore */ }
+			}
+			await clearCheckpoint(ticketKey);
+		}
+
+		return { choice: choice as ExistingPlanChoice, progress };
+	}
+	return { choice: 'fresh', progress: null };
+}
+
 // ---------------------------------------------------------------------------
 // MR/PR review comment handling
 // ---------------------------------------------------------------------------
@@ -760,17 +799,27 @@ export async function launchAgentForRepos(
 
 	let preApprovedPlan = false;
 	let approvedTodoItems: string[] = [];
+	let existingPlanContinue = false;
 
-	console.log(chalk.gray('\n  Generating implementation plan...'));
-	const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications);
-	if (planItems) {
-		const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
-		if (result.action === 'approve') {
-			approvedTodoItems = result.approved;
-			preApprovedPlan = true;
-		}
+	const existingPlan = await handleExistingPlan(detail.key, paths);
+	if (existingPlan.choice === 'continue') {
+		existingPlanContinue = true;
 	} else {
-		console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		const modifications = existingPlan.choice === 'modify'
+			? await askUser(chalk.cyan('  What should be changed? '))
+			: undefined;
+
+		console.log(chalk.gray('\n  Generating implementation plan...'));
+		const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
+		if (planItems) {
+			const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
+			if (result.action === 'approve') {
+				approvedTodoItems = result.approved;
+				preApprovedPlan = true;
+			}
+		} else {
+			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		}
 	}
 
 	await transitionIssueToInProgress(detail);
@@ -785,8 +834,8 @@ export async function launchAgentForRepos(
 			const ticketTitle = String(detail.fields.summary ?? detail.key);
 			const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
 
-			let resumeMode = false;
-			if (!reviewMode) {
+			let resumeMode = existingPlanContinue;
+			if (!resumeMode && !reviewMode) {
 				({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
 			}
 
@@ -931,6 +980,7 @@ export async function launchMultipleTickets(
 		figmaSection: string;
 		approvedTodoItems: string[];
 		preApprovedPlan: boolean;
+		existingPlanContinue: boolean;
 	};
 	const ticketPlans = new Map<string, TicketPlanData>();
 
@@ -949,19 +999,29 @@ export async function launchMultipleTickets(
 
 		let approvedTodoItems: string[] = [];
 		let preApprovedPlan = false;
+		let existingPlanContinue = false;
 
 		console.log(chalk.bold(`\n  ── ${detail.key}: ${detail.fields.summary ?? detail.key} ──`));
-		console.log(chalk.gray('  Generating implementation plan...'));
 
-		const planItems = await generateTodoPlan(detail, contributing ?? '', clarifications);
-		if (planItems) {
-			const result = await reviewTodoPlan(planItems, detail, contributing ?? '', clarifications);
-			if (result.action === 'approve') {
-				approvedTodoItems = result.approved;
-				preApprovedPlan = true;
-			}
+		const existingPlan = await handleExistingPlan(detail.key, paths);
+		if (existingPlan.choice === 'continue') {
+			existingPlanContinue = true;
 		} else {
-			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+			const modifications = existingPlan.choice === 'modify'
+				? await askUser(chalk.cyan('  What should be changed? '))
+				: undefined;
+
+			console.log(chalk.gray('  Generating implementation plan...'));
+			const planItems = await generateTodoPlan(detail, contributing ?? '', clarifications, modifications);
+			if (planItems) {
+				const result = await reviewTodoPlan(planItems, detail, contributing ?? '', clarifications);
+				if (result.action === 'approve') {
+					approvedTodoItems = result.approved;
+					preApprovedPlan = true;
+				}
+			} else {
+				console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+			}
 		}
 
 		ticketPlans.set(detail.key, {
@@ -971,6 +1031,7 @@ export async function launchMultipleTickets(
 			figmaSection,
 			approvedTodoItems,
 			preApprovedPlan,
+			existingPlanContinue,
 		});
 	}
 
@@ -997,6 +1058,7 @@ export async function launchMultipleTickets(
 		const figmaSection = planData?.figmaSection ?? '';
 		const preApprovedPlan = planData?.preApprovedPlan ?? false;
 		const approvedTodoItems = planData?.approvedTodoItems ?? [];
+		const existingPlanContinue = planData?.existingPlanContinue ?? false;
 
 		try {
 			const jiraUrl = getJiraBrowseUrl(detail);
@@ -1016,8 +1078,8 @@ export async function launchMultipleTickets(
 					const ticketTitle = String(detail.fields.summary ?? detail.key);
 					const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
 
-					let resumeMode = false;
-					if (!reviewMode) {
+					let resumeMode = existingPlanContinue;
+					if (!resumeMode && !reviewMode) {
 						({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
 					}
 
