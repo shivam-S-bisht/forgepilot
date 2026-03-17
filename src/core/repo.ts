@@ -89,7 +89,17 @@ function findMatchingRepo(normalizedUrl: string, remoteIndex: Map<string, string
 	return undefined;
 }
 
-function pickReposInteractive(repos: string[], ticketKey: string): Promise<string[]> {
+export const AI_DECIDES_SENTINEL = '__ai_decides__';
+
+export function pickReposInteractive(
+	repos: string[],
+	title: string,
+	options?: { includeAiOption?: boolean },
+): Promise<string[]> {
+	const displayItems = options?.includeAiOption
+		? [...repos, AI_DECIDES_SENTINEL]
+		: [...repos];
+
 	return new Promise((resolve) => {
 		let cursorIndex = 0;
 		const selectedIndices = new Set<number>();
@@ -97,7 +107,14 @@ function pickReposInteractive(repos: string[], ticketKey: string): Promise<strin
 		readline.emitKeypressEvents(process.stdin);
 		if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-		renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+		const render = () => renderRepoPicker(
+			displayItems.map((item) => item === AI_DECIDES_SENTINEL ? '✨ Let AI figure it out (select all repos)' : item),
+			cursorIndex,
+			selectedIndices,
+			title,
+		);
+
+		render();
 
 		const onKeypress = (_: unknown, key: readline.Key) => {
 			if (key.ctrl && key.name === 'c') {
@@ -107,28 +124,37 @@ function pickReposInteractive(repos: string[], ticketKey: string): Promise<strin
 			}
 
 			if (key.name === 'up') {
-				cursorIndex = cursorIndex === 0 ? repos.length - 1 : cursorIndex - 1;
-				renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+				cursorIndex = cursorIndex === 0 ? displayItems.length - 1 : cursorIndex - 1;
+				render();
 				return;
 			}
 
 			if (key.name === 'down') {
-				cursorIndex = cursorIndex === repos.length - 1 ? 0 : cursorIndex + 1;
-				renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+				cursorIndex = cursorIndex === displayItems.length - 1 ? 0 : cursorIndex + 1;
+				render();
 				return;
 			}
 
 			if (key.name === 'space') {
-				if (selectedIndices.has(cursorIndex)) selectedIndices.delete(cursorIndex);
-				else selectedIndices.add(cursorIndex);
-				renderRepoPicker(repos, cursorIndex, selectedIndices, ticketKey);
+				if (displayItems[cursorIndex] === AI_DECIDES_SENTINEL) {
+					const allSelected = repos.every((_, i) => selectedIndices.has(i));
+					if (allSelected) {
+						selectedIndices.clear();
+					} else {
+						for (let i = 0; i < repos.length; i++) selectedIndices.add(i);
+					}
+				} else {
+					if (selectedIndices.has(cursorIndex)) selectedIndices.delete(cursorIndex);
+					else selectedIndices.add(cursorIndex);
+				}
+				render();
 				return;
 			}
 
 			if (key.name === 'return' || key.name === 'enter') {
 				if (process.stdin.isTTY) process.stdin.setRawMode(false);
 				process.stdin.removeListener('keypress', onKeypress);
-				const picked = [...selectedIndices].sort().map((i) => repos[i]);
+				const picked = [...selectedIndices].sort().filter((i) => i < repos.length).map((i) => repos[i]);
 				resolve(picked);
 			}
 		};
@@ -217,7 +243,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 
 		const picked = isVoiceModeActive()
 			? await pickReposVoice(localRepoPaths, detail.key)
-			: await pickReposInteractive(localRepoPaths, detail.key);
+			: await pickReposInteractive(localRepoPaths, `Select repo(s) for ${detail.key}`);
 		if (!picked.length) throw new Error('No repos selected.');
 
 		await setCached(cacheKey, picked);
@@ -288,7 +314,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 			if (unmatched.length) {
 				const picked = isVoiceModeActive()
 					? await pickReposVoice(unmatched, detail.key)
-					: await pickReposInteractive(unmatched, detail.key);
+					: await pickReposInteractive(unmatched, `Select repo(s) for ${detail.key}`);
 				if (picked.length) {
 					await setCached(cacheKey, picked);
 					for (const p of picked) {

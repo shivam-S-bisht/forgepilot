@@ -43,11 +43,10 @@ export function renderRepoPicker(
 	repos: string[],
 	cursorIndex: number,
 	selectedIndices: Set<number>,
-	ticketKey: string,
+	title: string,
 ) {
 	clearScreen();
-	console.log(chalk.bold(`Select repo(s) for ${ticketKey}`));
-	console.log(chalk.gray('No repository URLs found in ticket description.'));
+	console.log(chalk.bold(title));
 	console.log(chalk.gray('Use ↑/↓ to navigate, Space to toggle, Enter to confirm.'));
 	console.log(chalk.gray('='.repeat(70)));
 	console.log();

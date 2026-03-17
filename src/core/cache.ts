@@ -13,7 +13,8 @@ async function ensureCacheDir(): Promise<void> {
 }
 
 function cacheFilePath(key: string): string {
-	return path.join(CACHE_DIR, `${key}.json`);
+	const safeKey = key.replace(/[/\\]/g, '-');
+	return path.join(CACHE_DIR, `${safeKey}.json`);
 }
 
 export async function getCached<T>(key: string): Promise<T | null> {

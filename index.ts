@@ -11,7 +11,7 @@ import { getCached, setCached } from './src/core/cache.js';
 import { runAutoMode, startInteractiveCli } from './src/core/cli.js';
 import { createJiraIssue, fetchBoards, fetchTicketsByScope } from './src/tools/jira/jira.js';
 import type { TicketScope } from './src/tools/jira/jira.js';
-import { scanLocalRepos } from './src/core/repo.js';
+import { pickReposInteractive, scanLocalRepos } from './src/core/repo.js';
 import { slackPickScope, startSlackCli } from './src/tools/slack/slack-cli.js';
 import { isSlackFullFlowEnabled } from './src/tools/slack/slack.js';
 import { renderScopePicker } from './src/core/ui.js';
@@ -149,24 +149,11 @@ async function runCustomTaskFlow(): Promise<void> {
 		return;
 	}
 
-	const repoOptions = localRepos.map((r) => ({ id: r, label: path.basename(r) }));
-	const selectedRepos: string[] = [];
-
-	while (true) {
-		const remaining = repoOptions.filter((r) => !selectedRepos.includes(r.id));
-		if (!remaining.length) break;
-
-		const prompt = selectedRepos.length
-			? `Add another repo? (${selectedRepos.map((r) => path.basename(r)).join(', ')} selected)`
-			: 'Select a repository:';
-		const chosen = await askUserChoice(prompt, [
-			...remaining,
-			{ id: '__done__', label: selectedRepos.length ? 'Done — start with selected repos' : 'Cancel' },
-		]);
-		if (chosen === '__done__') break;
-		selectedRepos.push(chosen);
-		console.log(chalk.green(`  ✓ Added ${path.basename(chosen)}`));
-	}
+	const selectedRepos = await pickReposInteractive(
+		localRepos,
+		'Select repo(s) for custom task',
+		{ includeAiOption: true },
+	);
 
 	if (!selectedRepos.length) {
 		console.log(chalk.yellow('No repos selected. Exiting.'));
