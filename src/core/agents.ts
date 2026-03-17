@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import { open as fsOpen } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
@@ -16,6 +17,8 @@ import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
 import { isSlackFullFlowEnabled, notifySlackStatus } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
+import { getLogFilePath, registerJob, updateJob } from './job-manager.js';
+import type { JobRecord } from './job-manager.js';
 import { askUser, askUserChoice } from './ask.js';
 import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
 
@@ -431,6 +434,98 @@ async function runCommandInteractive(command: string, args: string[], toolName: 
 			reject(new Error(`${toolName} CLI exited with code ${code ?? 'unknown'}`));
 		});
 	});
+}
+
+export async function runCommandBackground(
+	command: string,
+	args: string[],
+	toolName: string,
+	ticketKey: string,
+	title: string,
+	repos: string[],
+	cwd?: string,
+): Promise<JobRecord> {
+	const logFile = getLogFilePath(ticketKey);
+	const logFd = await fsOpen(logFile, 'w');
+
+	const child = spawn(command, args, {
+		stdio: ['ignore', logFd.fd, logFd.fd],
+		detached: true,
+		...(cwd ? { cwd } : {}),
+	});
+	child.unref();
+
+	const job: JobRecord = {
+		id: ticketKey,
+		ticketKey,
+		title,
+		agent: toolName,
+		pid: child.pid!,
+		logFile,
+		status: 'running',
+		startedAt: new Date().toISOString(),
+		repos,
+		effectivePaths: cwd ? [cwd] : [],
+	};
+
+	await registerJob(job);
+
+	child.on('error', async () => {
+		await logFd.close();
+		await updateJob(ticketKey, {
+			status: 'failed',
+			error: `${toolName} CLI not found or failed to start`,
+			finishedAt: new Date().toISOString(),
+		});
+	});
+
+	child.on('exit', async (code) => {
+		await logFd.close();
+		await updateJob(ticketKey, {
+			status: code === 0 ? 'done' : 'failed',
+			error: code !== 0 ? `Exited with code ${code ?? 'unknown'}` : undefined,
+			finishedAt: new Date().toISOString(),
+		});
+	});
+
+	return job;
+}
+
+export function resolveAgentCommand(
+	agentOption: WorkAgentOption,
+	prompt: string,
+	repoPath: string,
+	jiraUrl: string,
+	additionalDirs: string[] = [],
+): { command: string; args: string[]; toolName: string } {
+	const addDirArgs = (dirs: string[]) => dirs.flatMap((d) => ['--add-dir', d]);
+
+	switch (agentOption.id) {
+		case 'copilot-autonomous':
+			return { command: 'copilot', args: ['-p', prompt, '--autopilot', '--allow-all-tools', '--allow-all-paths', '--add-dir', repoPath, ...addDirArgs(additionalDirs)], toolName: 'Copilot' };
+		case 'copilot-interactive':
+			return { command: 'copilot', args: ['-i', prompt, '--add-dir', repoPath, ...addDirArgs(additionalDirs)], toolName: 'Copilot' };
+		case 'claude-code-autonomous':
+			return { command: 'claude', args: ['-p', prompt, '--add-dir', repoPath, ...addDirArgs(additionalDirs)], toolName: 'Claude Code' };
+		case 'claude-code-interactive':
+			return { command: 'claude', args: [prompt, '--add-dir', repoPath, ...addDirArgs(additionalDirs)], toolName: 'Claude Code' };
+		case 'cursor-autonomous':
+			return { command: 'cursor', args: ['agent', '--yolo', '--workspace', repoPath, '-p', prompt], toolName: 'Cursor Agent' };
+		case 'gemini-autonomous':
+			return { command: 'gemini', args: ['-p', prompt], toolName: 'Gemini CLI' };
+		case 'codex-full-auto':
+			return { command: 'codex', args: ['--full-auto', prompt], toolName: 'Codex CLI' };
+		case 'codex-autonomous':
+			return { command: 'codex', args: ['--yolo', prompt], toolName: 'Codex CLI' };
+		case 'aider-autonomous':
+			return { command: 'aider', args: ['--message', prompt, '--yes', '--no-auto-commits'], toolName: 'Aider' };
+		case 'opencode-autonomous':
+			return { command: 'opencode', args: ['--prompt', prompt], toolName: 'OpenCode' };
+		case 'cline-autonomous':
+			return { command: 'cline', args: ['--yolo', prompt], toolName: 'Cline CLI' };
+		case 'rovo-autonomous':
+			return { command: 'acli', args: ['rovodev', 'run', '--yolo', '--jira', jiraUrl, prompt], toolName: 'Rovo' };
+	}
 }
 
 async function runCopilotForTicket(
