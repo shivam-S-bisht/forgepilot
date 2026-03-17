@@ -8,6 +8,7 @@ import {
 	linkedIssuesText,
 } from '../tools/jira/jira-text.js';
 import type { TicketRunStatus, TicketView, WorkAgentOption } from './types.js';
+import type { JobStatus } from './job-manager.js';
 
 const LIST_PAGE_SIZE = 20;
 
@@ -112,11 +113,25 @@ export function renderPostAgentPrompt(ticket: TicketView, message: string) {
 	console.log(chalk.gray('='.repeat(90)));
 }
 
+function jobStatusBadge(status: JobStatus): string {
+	switch (status) {
+		case 'running':
+			return chalk.cyan('⟳ AI Working');
+		case 'done':
+			return chalk.green('✓ AI Done');
+		case 'failed':
+			return chalk.red('✗ AI Failed');
+		case 'stopped':
+			return chalk.yellow('■ Stopped');
+	}
+}
+
 export function renderList(
 	tickets: TicketView[],
 	selectedIndex: number,
 	expandedScope = false,
 	checkedIndices?: Set<number>,
+	jobStatuses?: Map<string, JobStatus>,
 ) {
 	clearScreen();
 	console.log(chalk.bold('My Jira Tickets'));
@@ -146,7 +161,15 @@ export function renderList(
 		const isCursor = i === selectedIndex;
 		const pointer = isCursor ? chalk.bold.cyan('▶') : ' ';
 		const isChecked = checkedIndices?.has(i);
-		const checkbox = isChecked ? chalk.green('◉') : chalk.gray('○');
+		const jobStatus = jobStatuses?.get(t.key);
+
+		let checkbox: string;
+		if (jobStatus) {
+			checkbox = jobStatusBadge(jobStatus);
+		} else {
+			checkbox = isChecked ? chalk.green('◉') : chalk.gray('○');
+		}
+
 		const keyLabel = isCursor ? chalk.bold.white(t.key) : chalk.white(t.key);
 		const titleLabel = isCursor ? chalk.bold(t.title) : chalk.gray(t.title);
 		console.log(`${pointer} ${checkbox} ${keyLabel}  ${titleLabel}`);
@@ -154,7 +177,11 @@ export function renderList(
 
 	console.log(chalk.gray('-'.repeat(90)));
 	const checkedCount = checkedIndices?.size ?? 0;
-	const countInfo = checkedCount > 0 ? `  |  ${checkedCount} selected` : '';
+	const runningCount = jobStatuses ? [...jobStatuses.values()].filter((s) => s === 'running').length : 0;
+	const parts: string[] = [];
+	if (checkedCount > 0) parts.push(`${checkedCount} selected`);
+	if (runningCount > 0) parts.push(`${runningCount} AI running`);
+	const countInfo = parts.length ? `  |  ${parts.join('  |  ')}` : '';
 	if (tickets.length > LIST_PAGE_SIZE) {
 		console.log(chalk.gray(`Showing ${pageStart + 1}-${pageEnd} of ${tickets.length}${countInfo}`));
 	} else {
