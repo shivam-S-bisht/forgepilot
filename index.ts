@@ -262,10 +262,15 @@ async function main() {
 				{ id: 'ticket', label: 'Work from a Jira ticket', description: 'Pick a ticket from your board and let an agent implement it.' },
 				{ id: 'custom', label: 'Work from a description', description: 'Describe a task in plain text — no Jira ticket needed.' },
 			];
-			const workMode = await pickSingleOption(WORK_MODE_OPTIONS, 0, 'ForgePilot', 'How would you like to start?');
-			if (workMode === 'custom') {
-				await runCustomTaskFlow();
-				return;
+
+			let selectedTicketMode = false;
+			while (!selectedTicketMode) {
+				const workMode = await pickSingleOption(WORK_MODE_OPTIONS, 0, 'ForgePilot', 'How would you like to start?');
+				if (workMode === 'custom') {
+					await runCustomTaskFlow();
+				} else {
+					selectedTicketMode = true;
+				}
 			}
 		}
 
