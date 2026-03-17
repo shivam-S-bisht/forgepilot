@@ -83,10 +83,16 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		process.stdin.setRawMode(true);
 	}
 
+	let statusRefreshInterval: ReturnType<typeof setInterval> | null = null;
+
 	const cleanup = () => {
 		if (logTailInterval) {
 			clearInterval(logTailInterval);
 			logTailInterval = null;
+		}
+		if (statusRefreshInterval) {
+			clearInterval(statusRefreshInterval);
+			statusRefreshInterval = null;
 		}
 		if (process.stdin.isTTY) {
 			process.stdin.setRawMode(false);
@@ -136,6 +142,25 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	}
 
 	const redrawList = () => renderList(tickets, selectedIndex, expandedScope, checkedIndices, jobStatusMap);
+
+	const isMainListVisible = () =>
+		!inDetailView && !inAgentPicker && !inMultiAgentPicker && !inMultiBrief &&
+		!showPostAgentPrompt && !showMultiSummary && !inJobList && !inLogViewer && !launchingAgent;
+
+	statusRefreshInterval = setInterval(async () => {
+		const prevMap = new Map(jobStatusMap);
+		await refreshJobStatuses();
+		let changed = false;
+		for (const [k, v] of jobStatusMap) {
+			if (prevMap.get(k) !== v) { changed = true; break; }
+		}
+		for (const k of prevMap.keys()) {
+			if (!jobStatusMap.has(k)) { changed = true; break; }
+		}
+		if (changed && isMainListVisible()) {
+			redrawList();
+		}
+	}, 5000);
 
 	redrawList();
 
