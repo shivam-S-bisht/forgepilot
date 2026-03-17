@@ -2,7 +2,7 @@ import readline from 'node:readline';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { unlinkSync, existsSync, statSync } from 'node:fs';
+import { unlinkSync, existsSync, statSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
@@ -13,7 +13,8 @@ import type { TicketScope } from '../jira/jira.js';
 import { fetchIssueDetail, transitionIssueToInProgress } from '../jira/jira.js';
 import { getDescriptionText, getAcceptanceCriteria, getJiraBrowseUrl } from '../jira/jira-text.js';
 import { gitExec, findOpenPullRequest, fetchUnresolvedReviewComments, pushBranchAndCreateMR, prepareRepoForWork } from '../git/git.js';
-import { parseTodoProgress, getAvailableAgentOptions, launchAgentForRepos, launchMultipleTickets, launchAgentForCustomTask, resolveAgentOptionById } from '../../core/agents.js';
+import { parseTodoProgress, getAvailableAgentOptions, launchAgentForRepos, launchAgentInBackground, launchMultipleTickets, launchAgentForCustomTask, resolveAgentOptionById } from '../../core/agents.js';
+import { getJobs, getJob, stopJob as stopJobById } from '../../core/job-manager.js';
 import { getCached } from '../../core/cache.js';
 import { resolveRepoPathsAuto, scanLocalRepos } from '../../core/repo.js';
 import {
@@ -857,6 +858,148 @@ function handleShowHelp(): void {
 	printAndSpeak('I listed all available commands on screen.');
 }
 
+async function handleListJobs(): Promise<void> {
+	const jobs = await getJobs();
+	if (!jobs.length) {
+		printAndSpeak('No background jobs found.');
+		return;
+	}
+
+	console.log(chalk.bold('\n  Background Jobs:\n'));
+	const statusIcon: Record<string, string> = { running: '⟳', done: '✓', failed: '✗', stopped: '■' };
+	for (const j of jobs) {
+		const icon = statusIcon[j.status] ?? '?';
+		console.log(chalk.white(`    ${icon} ${j.ticketKey}  ${j.status}  ${j.title}`));
+	}
+	console.log();
+
+	const running = jobs.filter((j) => j.status === 'running').length;
+	const done = jobs.filter((j) => j.status === 'done').length;
+	const failed = jobs.filter((j) => j.status === 'failed').length;
+	printAndSpeak(`${jobs.length} background job${jobs.length > 1 ? 's' : ''}. ${running} running, ${done} done, ${failed} failed.`);
+}
+
+async function handleJobStatus(params: Record<string, string>, state: VoiceState): Promise<void> {
+	const key = resolveTicketKey(params, state);
+	if (!key) {
+		const jobs = await getJobs();
+		const running = jobs.filter((j) => j.status === 'running');
+		if (running.length === 1) {
+			const j = running[0];
+			printAndSpeak(`${j.ticketKey} is running with ${j.agent}.`);
+			return;
+		}
+		printAndSpeak('Which ticket? Say the ticket key.');
+		return;
+	}
+
+	const job = await getJob(key);
+	if (!job) {
+		printAndSpeak(`No background job found for ${key}.`);
+		return;
+	}
+
+	const elapsed = job.finishedAt
+		? `Finished at ${new Date(job.finishedAt).toLocaleTimeString()}.`
+		: `Running since ${new Date(job.startedAt).toLocaleTimeString()}.`;
+	const errorPart = job.error ? ` Error: ${job.error.slice(0, 80)}.` : '';
+	printAndSpeak(`${key} is ${job.status}. Agent: ${job.agent}. ${elapsed}${errorPart}`);
+}
+
+async function handleViewJobLogs(params: Record<string, string>, state: VoiceState): Promise<void> {
+	const key = resolveTicketKey(params, state);
+	if (!key) {
+		printAndSpeak('Which ticket? Say the ticket key.');
+		return;
+	}
+
+	const job = await getJob(key);
+	if (!job) {
+		printAndSpeak(`No background job found for ${key}.`);
+		return;
+	}
+
+	if (!existsSync(job.logFile)) {
+		printAndSpeak('Log file not found yet.');
+		return;
+	}
+
+	const content = readFileSync(job.logFile, 'utf8');
+	const lines = content.split('\n').filter(Boolean);
+	const tail = lines.slice(-20);
+
+	console.log(chalk.bold(`\n  Logs for ${key} (last ${tail.length} lines):\n`));
+	for (const line of tail) {
+		console.log(chalk.gray(`    ${line}`));
+	}
+	console.log();
+
+	printAndSpeak(`Showing the last ${tail.length} lines of logs for ${key}. Status is ${job.status}.`);
+}
+
+async function handleStopJob(params: Record<string, string>, state: VoiceState): Promise<void> {
+	const key = resolveTicketKey(params, state);
+	if (!key) {
+		printAndSpeak('Which ticket? Say the ticket key.');
+		return;
+	}
+
+	const job = await getJob(key);
+	if (!job) {
+		printAndSpeak(`No background job found for ${key}.`);
+		return;
+	}
+
+	if (job.status !== 'running') {
+		printAndSpeak(`${key} is not running. Status is ${job.status}.`);
+		return;
+	}
+
+	const stopped = await stopJobById(key);
+	if (stopped) {
+		printAndSpeak(`Stopped the agent for ${key}.`);
+	} else {
+		printAndSpeak(`Could not stop the agent for ${key}.`);
+	}
+}
+
+async function handleRetryJob(params: Record<string, string>, state: VoiceState): Promise<void> {
+	const key = resolveTicketKey(params, state);
+	if (!key) {
+		printAndSpeak('Which ticket? Say the ticket key.');
+		return;
+	}
+
+	const job = await getJob(key);
+	if (!job) {
+		printAndSpeak(`No background job found for ${key}.`);
+		return;
+	}
+
+	if (job.status === 'running') {
+		printAndSpeak(`${key} is already running.`);
+		return;
+	}
+
+	const agentOpt = job.agentOptionId ? resolveAgentOptionById(job.agentOptionId) : null;
+	if (!agentOpt) {
+		printAndSpeak(`Could not resolve the agent for ${key}. Cannot retry.`);
+		return;
+	}
+
+	try {
+		printAndSpeak(`Retrying ${key} with ${agentOpt.label}...`);
+		const detail = await fetchIssueDetail(key);
+		const repoPaths = new Map<string, string>();
+		for (const p of job.repos) repoPaths.set(p, p);
+		await launchAgentInBackground(detail, agentOpt, repoPaths);
+		printAndSpeak(`${key} relaunched in background.`);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		printAndSpeak(`Failed to retry ${key}: ${msg.slice(0, 80)}`);
+	}
+}
+
 const COMMAND_HANDLERS: Record<string, (params: Record<string, string>, state: VoiceState) => Promise<void> | void> = {
 	listTickets: handleListTickets,
 	getTicketDetails: handleGetTicketDetails,
@@ -870,6 +1013,11 @@ const COMMAND_HANDLERS: Record<string, (params: Record<string, string>, state: V
 	commitChanges: handleCommitChanges,
 	prepareBranch: handlePrepareBranch,
 	customTask: handleCustomTask,
+	listJobs: handleListJobs,
+	jobStatus: handleJobStatus,
+	viewJobLogs: handleViewJobLogs,
+	stopJob: handleStopJob,
+	retryJob: handleRetryJob,
 	showMore: handleShowMore,
 	showHelp: handleShowHelp,
 	stopVoice: () => {},
