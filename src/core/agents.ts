@@ -1007,6 +1007,105 @@ export async function launchAgentForRepos(
 	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 }
 
+export async function launchAgentInBackground(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	repoPaths: Map<string, string>,
+): Promise<JobRecord> {
+	const paths = [...repoPaths.values()];
+
+	const firstRepoContributing = await readContributing(paths[0]);
+	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
+	const clarifications = formatClarifications(preflight);
+	const referenceRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
+
+	const figmaSection = await fetchFigmaDesignContext(detail);
+	const jiraUrl = getJiraBrowseUrl(detail);
+
+	let preApprovedPlan = false;
+	let approvedTodoItems: string[] = [];
+	let existingPlanContinue = false;
+
+	const existingPlan = await handleExistingPlan(detail.key, paths);
+	if (existingPlan.choice === 'continue') {
+		existingPlanContinue = true;
+	} else {
+		const modifications = existingPlan.choice === 'modify'
+			? await askUser(chalk.cyan('  What should be changed? '))
+			: undefined;
+
+		console.log(chalk.gray('\n  Generating implementation plan...'));
+		const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
+		if (planItems) {
+			const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
+			if (result.action === 'approve') {
+				approvedTodoItems = result.approved;
+				preApprovedPlan = true;
+			}
+		} else {
+			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		}
+	}
+
+	await transitionIssueToInProgress(detail);
+
+	const repoPath = paths[0];
+	const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
+	const ticketTitle = String(detail.fields.summary ?? detail.key);
+	const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
+
+	let resumeMode = existingPlanContinue;
+	if (!resumeMode && !reviewMode) {
+		({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
+	}
+
+	if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
+		const todoPath = todoFilePath(effectivePath, detail.key);
+		const todoContent = [
+			`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
+			'',
+			...approvedTodoItems.map((item) => `- [ ] ${item}`),
+			'',
+		].join('\n');
+		await fs.writeFile(todoPath, todoContent, 'utf8');
+	}
+
+	const contributing = await readContributing(effectivePath);
+	const axonHint = getAxonPromptHint(effectivePath);
+	const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
+	const isResume = resumeMode;
+
+	const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, '', isResume, reviewMode ? reviewComments : [], usePreApproved);
+
+	await saveCheckpoint(detail.key, {
+		ticketKey: detail.key,
+		agentId: agentOption.id,
+		agentLabel: agentOption.label,
+		repoPath,
+		effectivePath,
+		startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+		lastUpdatedAt: new Date().toISOString(),
+	});
+
+	const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+
+	const job = await runCommandBackground(
+		command,
+		args,
+		toolName,
+		detail.key,
+		ticketTitle,
+		paths,
+		effectivePath,
+	);
+
+	startAxonWatch(effectivePath);
+
+	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} in background (PID ${job.pid}).`);
+
+	return job;
+}
+
 export function resolveAgentOptionById(id: string): WorkAgentOption | undefined {
 	const match = ALL_AGENT_OPTIONS.find((o) => o.id === id);
 	if (!match) return undefined;
