@@ -262,10 +262,23 @@ server.tool(
 				}
 			}
 		}
-		await gitExec(repo_path, ['commit', '-m', message]);
+
+		const TRAILER_RE = /^[\w-]+-by:\s/i;
+		const lines = message.split('\n');
+		while (lines.length > 0) {
+			const last = lines[lines.length - 1].trim();
+			if (last === '' || TRAILER_RE.test(last)) {
+				lines.pop();
+			} else {
+				break;
+			}
+		}
+		const cleanMessage = lines.join('\n').trimEnd() || message;
+
+		await gitExec(repo_path, ['commit', '-m', cleanMessage]);
 		const hash = await gitExec(repo_path, ['rev-parse', '--short', 'HEAD']);
 		return {
-			content: [{ type: 'text', text: `Committed: ${hash} — ${message}` }],
+			content: [{ type: 'text', text: `Committed: ${hash} — ${cleanMessage}` }],
 		};
 	},
 );
