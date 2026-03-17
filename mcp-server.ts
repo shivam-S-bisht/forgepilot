@@ -3,8 +3,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { existsSync, readFileSync } from 'node:fs';
 import { activateAxonVenv, getAxonPromptHint, startAxonWatch } from './src/tools/axon/axon.js';
-import { parseTodoProgress } from './src/core/agents.js';
+import { parseTodoProgress, launchAgentInBackground, resolveAgentOptionById } from './src/core/agents.js';
+import { getJobs, getJob, stopJob } from './src/core/job-manager.js';
 import { clearCache, clearCached, getAllCache, getCached, setCached } from './src/core/cache.js';
 import { fetchFigmaDesignContext } from './src/tools/figma/figma.js';
 import { fetchUnresolvedReviewComments, findOpenPullRequest, gitExec, prepareRepoForWork, pushBranchAndCreateMR, readContributing } from './src/tools/git/git.js';
@@ -700,6 +702,125 @@ server.tool(
 				}, null, 2),
 			}],
 		};
+	},
+);
+
+// ---------------------------------------------------------------------------
+// Background Job Tools
+// ---------------------------------------------------------------------------
+
+server.tool(
+	'list_jobs',
+	'List all background agent jobs with their status, ticket key, agent, and timing.',
+	{},
+	async () => {
+		const jobs = await getJobs();
+		return {
+			content: [{ type: 'text', text: JSON.stringify(jobs, null, 2) }],
+		};
+	},
+);
+
+server.tool(
+	'get_job_status',
+	'Get the status of a background agent job for a specific ticket.',
+	{
+		ticket_key: z.string().describe('Jira ticket key, e.g. CE-1234'),
+	},
+	async ({ ticket_key }) => {
+		const job = await getJob(ticket_key);
+		if (!job) {
+			return { content: [{ type: 'text', text: `No background job found for ${ticket_key}` }] };
+		}
+		return { content: [{ type: 'text', text: JSON.stringify(job, null, 2) }] };
+	},
+);
+
+server.tool(
+	'launch_background_agent',
+	'Launch an AI agent in the background for a Jira ticket. Returns the job record with PID and log file path.',
+	{
+		ticket_key: z.string().describe('Jira ticket key, e.g. CE-1234'),
+		agent_id: z.string().describe('Agent option ID, e.g. claude-code-autonomous, copilot-autonomous'),
+		root_dir: z.string().describe('Root directory containing local repos (e.g. "~/dev")'),
+	},
+	async ({ ticket_key, agent_id, root_dir }) => {
+		const agentOption = resolveAgentOptionById(agent_id);
+		if (!agentOption) {
+			return { content: [{ type: 'text', text: `Unknown agent ID: ${agent_id}` }] };
+		}
+
+		const detail = await fetchIssueDetail(ticket_key);
+		const description = getDescriptionText(detail);
+		const ticketRepos = extractRepoLabels(description);
+		const resolvedRoot = root_dir.replace(/^~/, process.env.HOME ?? '~');
+		const localRepoPaths = await scanLocalRepos(resolvedRoot);
+
+		const remoteIndex = new Map<string, string>();
+		for (const localPath of localRepoPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+			}
+		}
+
+		const repoMap = new Map<string, string>();
+		for (const repo of ticketRepos) {
+			const localPath = remoteIndex.get(repo.normalizedUrl);
+			if (localPath) repoMap.set(repo.label, localPath);
+		}
+
+		if (!repoMap.size && localRepoPaths.length) {
+			const cached = await getCached<string[]>(`repoChoice_${ticket_key}`);
+			if (cached?.length) {
+				for (const p of cached) {
+					const name = p.split('/').pop() ?? p;
+					repoMap.set(name, p);
+				}
+			}
+		}
+
+		if (!repoMap.size) {
+			return { content: [{ type: 'text', text: `No repos found for ${ticket_key}. Check ticket description or cache.` }] };
+		}
+
+		const job = await launchAgentInBackground(detail, agentOption, repoMap);
+		return { content: [{ type: 'text', text: JSON.stringify(job, null, 2) }] };
+	},
+);
+
+server.tool(
+	'stop_job',
+	'Stop a running background agent job for a ticket.',
+	{
+		ticket_key: z.string().describe('Jira ticket key, e.g. CE-1234'),
+	},
+	async ({ ticket_key }) => {
+		const stopped = await stopJob(ticket_key);
+		return {
+			content: [{ type: 'text', text: stopped ? `Stopped job for ${ticket_key}` : `Could not stop job for ${ticket_key} (not running or not found)` }],
+		};
+	},
+);
+
+server.tool(
+	'get_job_logs',
+	'Get the last N lines of a background agent log file for a ticket.',
+	{
+		ticket_key: z.string().describe('Jira ticket key, e.g. CE-1234'),
+		tail_lines: z.number().default(50).describe('Number of lines to return from end of log'),
+	},
+	async ({ ticket_key, tail_lines }) => {
+		const job = await getJob(ticket_key);
+		if (!job) {
+			return { content: [{ type: 'text', text: `No background job found for ${ticket_key}` }] };
+		}
+		if (!existsSync(job.logFile)) {
+			return { content: [{ type: 'text', text: 'Log file not found yet.' }] };
+		}
+		const content = readFileSync(job.logFile, 'utf8');
+		const lines = content.split('\n').slice(-tail_lines).join('\n');
+		return { content: [{ type: 'text', text: lines || '(no output yet)' }] };
 	},
 );
 
