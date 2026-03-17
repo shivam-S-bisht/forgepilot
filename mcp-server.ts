@@ -251,6 +251,14 @@ server.tool(
 	async ({ repo_path, message, stage_all }) => {
 		if (stage_all) {
 			await gitExec(repo_path, ['add', '-A']);
+			const metaGlobs = ['.forgepilot-todos-*.md', '.forgepilot-questions-*.md', '.forgepilot-answers-*.md'];
+			for (const glob of metaGlobs) {
+				try {
+					await gitExec(repo_path, ['reset', 'HEAD', '--', glob]);
+				} catch {
+					// File may not exist or not be staged
+				}
+			}
 		}
 		await gitExec(repo_path, ['commit', '-m', message]);
 		const hash = await gitExec(repo_path, ['rev-parse', '--short', 'HEAD']);

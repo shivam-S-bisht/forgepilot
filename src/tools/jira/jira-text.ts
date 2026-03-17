@@ -264,8 +264,8 @@ export function buildWorkPrompt(
 		'',
 		`5. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
 		'   a. Complete the task.',
-		`   b. Mark it done in ${todoFile} by changing "- [ ]" to "- [x]".`,
-		`   c. Commit the code changes (do NOT include ${todoFile}, ${questionsFile}, or ${answersFile} in the commit).`,
+		`   b. IMPORTANT: Mark it done in ${todoFile} by changing "- [ ]" to "- [x]". This is critical for progress tracking and checkpoint resume.`,
+		`   c. Commit the code changes (${todoFile} and other metadata files are automatically excluded).`,
 		`      Use commit message format: ${detail.key} <concise description of what was done>`,
 		'   d. Move to the next item.',
 		'',
@@ -300,7 +300,7 @@ export function buildWorkPrompt(
 
 	sections.push(
 		'=== CONSTRAINTS ===',
-		`- Commit after completing each todo item. Use the format: ${detail.key} <concise description>. Do NOT include ${todoFile}, ${questionsFile}, or ${answersFile} in any commit. Do NOT push to remote.`,
+		`- Commit after completing each todo item. Use the format: ${detail.key} <concise description>. Metadata files (${todoFile}, ${questionsFile}, ${answersFile}) are automatically excluded from commits. Do NOT push to remote.`,
 		'- Do NOT add Co-authored-by, Signed-off-by, or any other trailers to commit messages. Keep commits clean with only the ticket key and description.',
 		'- Do NOT delete or rename files unless the ticket explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
@@ -436,8 +436,8 @@ export function buildCustomTaskPrompt(
 		'',
 		`4. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
 		'   a. Complete the task.',
-		`   b. Mark it done in ${todoFile} by changing "- [ ]" to "- [x]".`,
-		`   c. Commit the code changes (do NOT include ${todoFile} in the commit).`,
+		`   b. IMPORTANT: Mark it done in ${todoFile} by changing "- [ ]" to "- [x]". This is critical for progress tracking and checkpoint resume.`,
+		`   c. Commit the code changes (${todoFile} and other metadata files are automatically excluded).`,
 		`      Use commit message format: ${branchName} <concise description of what was done>`,
 		'   d. Move to the next item.',
 		'',
@@ -450,7 +450,7 @@ export function buildCustomTaskPrompt(
 
 	sections.push(
 		'=== CONSTRAINTS ===',
-		`- Commit after completing each todo item. Use the format: ${branchName} <concise description>. Do NOT include ${todoFile} in any commit. Do NOT push to remote.`,
+		`- Commit after completing each todo item. Use the format: ${branchName} <concise description>. Metadata files (${todoFile}) are automatically excluded from commits. Do NOT push to remote.`,
 		'- Do NOT add Co-authored-by, Signed-off-by, or any other trailers to commit messages.',
 		'- Do NOT delete or rename files unless the task explicitly requires it.',
 		'- Match existing code style: indentation, naming, file organization, and patterns.',
