@@ -4,9 +4,12 @@ import {
 	cleanupWorktrees,
 	getAvailableAgentOptions,
 	launchAgentForRepos,
+	launchAgentInBackground,
 	launchMultipleTickets,
 	resolveAgentOptionById,
 } from './agents.js';
+import { getJobs, cleanupStaleJobs, isTicketRunning } from './job-manager.js';
+import type { JobStatus } from './job-manager.js';
 import { pushBranchAndCreateMR } from '../tools/git/git.js';
 import { fetchIssueDetail, fetchTicketsByJql, LOAD_MORE_TICKETS_JQL } from '../tools/jira/jira.js';
 import { getJiraBrowseUrl } from '../tools/jira/jira-text.js';
@@ -49,6 +52,20 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let launchingAgent = false;
 	let expandedScope = false;
 	const checkedIndices = new Set<number>();
+	const jobStatusMap = new Map<string, JobStatus>();
+
+	async function refreshJobStatuses(): Promise<void> {
+		const jobs = await getJobs();
+		jobStatusMap.clear();
+		for (const job of jobs) {
+			if (job.status === 'running' || job.status === 'done' || job.status === 'failed' || job.status === 'stopped') {
+				jobStatusMap.set(job.ticketKey, job.status);
+			}
+		}
+	}
+
+	await cleanupStaleJobs();
+	await refreshJobStatuses();
 
 	readline.emitKeypressEvents(process.stdin);
 	if (process.stdin.isTTY) {
@@ -62,7 +79,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		process.stdin.removeAllListeners('keypress');
 	};
 
-	const redrawList = () => renderList(tickets, selectedIndex, expandedScope, checkedIndices);
+	const redrawList = () => renderList(tickets, selectedIndex, expandedScope, checkedIndices, jobStatusMap);
 
 	redrawList();
 
@@ -309,36 +326,35 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 						return;
 					}
 
-					launchingAgent = true;
-					inAgentPicker = false;
-					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+					if (await isTicketRunning(selectedTicket.key)) {
+						inAgentPicker = false;
+						clearScreen();
+						console.log(chalk.yellow(`  ${selectedTicket.key} already has an AI agent running. View it from the ticket list.`));
+						console.log(chalk.gray('\n  Press any key to go back...'));
+						return;
+					}
 
 					const selectedOption = agentOptions[selectedAgentIndex];
 					lastAgentOption = selectedOption;
+					inAgentPicker = false;
+
 					clearScreen();
-					console.log(chalk.bold(`Starting ${selectedOption.label} for ${selectedTicket.key}...`));
-					let launchFailed = false;
-					let launchErrorMessage = '';
+					console.log(chalk.bold(`Launching ${selectedOption.label} for ${selectedTicket.key} in background...`));
 
 					try {
 						const repoPaths = await resolveRepoPathsFromUser(selectedDetail);
 						lastResolvedPaths = repoPaths;
-						await launchAgentForRepos(selectedDetail, selectedOption, repoPaths);
+						await launchAgentInBackground(selectedDetail, selectedOption, repoPaths);
+						await refreshJobStatuses();
+						console.log(chalk.green(`  ✓ ${selectedOption.label} launched in background for ${selectedTicket.key}`));
 					} catch (error) {
-						launchFailed = true;
-						launchErrorMessage = error instanceof Error ? error.message : String(error);
-					} finally {
-						if (process.stdin.isTTY) process.stdin.setRawMode(true);
-						launchingAgent = false;
+						const msg = error instanceof Error ? error.message : String(error);
+						console.log(chalk.red(`  Failed to launch: ${msg}`));
 					}
 
-					showPostAgentPrompt = true;
-					postAgentMessage = launchFailed
-						? chalk.red(`Failed to start ${selectedOption.label}: ${launchErrorMessage}`)
-						: chalk.green(
-								`${selectedOption.label} finished. Review output and choose next step.`,
-							);
-					renderPostAgentPrompt(selectedTicket, postAgentMessage);
+					inDetailView = false;
+					await new Promise((r) => setTimeout(r, 1500));
+					redrawList();
 					return;
 				}
 				return;
@@ -353,36 +369,35 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				const selected = tickets[selectedIndex];
 				if (!selected.detail || launchingAgent) return;
 
+				if (await isTicketRunning(selected.key)) {
+					clearScreen();
+					console.log(chalk.yellow(`  ${selected.key} already has an AI agent running. View it from the ticket list.`));
+					console.log(chalk.gray('\n  Press any key to go back...'));
+					return;
+				}
+
 				const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
 				if (defaultAgentId) {
 					const defaultOption = resolveAgentOptionById(defaultAgentId);
 					if (defaultOption) {
-						launchingAgent = true;
-						if (process.stdin.isTTY) process.stdin.setRawMode(false);
-
 						lastAgentOption = defaultOption;
 						clearScreen();
-						console.log(chalk.bold(`Starting ${defaultOption.label} for ${selected.key}...`));
-						let launchFailed = false;
-						let launchErrorMessage = '';
+						console.log(chalk.bold(`Launching ${defaultOption.label} for ${selected.key} in background...`));
 
 						try {
 							const repoPaths = await resolveRepoPathsFromUser(selected.detail);
 							lastResolvedPaths = repoPaths;
-							await launchAgentForRepos(selected.detail, defaultOption, repoPaths);
+							await launchAgentInBackground(selected.detail, defaultOption, repoPaths);
+							await refreshJobStatuses();
+							console.log(chalk.green(`  ✓ ${defaultOption.label} launched in background for ${selected.key}`));
 						} catch (error) {
-							launchFailed = true;
-							launchErrorMessage = error instanceof Error ? error.message : String(error);
-						} finally {
-							if (process.stdin.isTTY) process.stdin.setRawMode(true);
-							launchingAgent = false;
+							const msg = error instanceof Error ? error.message : String(error);
+							console.log(chalk.red(`  Failed to launch: ${msg}`));
 						}
 
-						showPostAgentPrompt = true;
-						postAgentMessage = launchFailed
-							? chalk.red(`Failed to start ${defaultOption.label}: ${launchErrorMessage}`)
-							: chalk.green(`${defaultOption.label} finished. Review output and choose next step.`);
-						renderPostAgentPrompt(selected, postAgentMessage);
+						inDetailView = false;
+						await new Promise((r) => setTimeout(r, 1500));
+						redrawList();
 						return;
 					}
 				}
@@ -696,35 +711,33 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			const defaultAgentId = process.env.FORGEPILOT_DEFAULT_AGENT?.trim();
 
 			if (skipDetail && defaultAgentId && selected.detail) {
+				if (await isTicketRunning(selected.key)) {
+					clearScreen();
+					console.log(chalk.yellow(`  ${selected.key} already has an AI agent running.`));
+					await new Promise((r) => setTimeout(r, 1500));
+					redrawList();
+					return;
+				}
+
 				const defaultOption = resolveAgentOptionById(defaultAgentId);
 				if (defaultOption) {
-					launchingAgent = true;
-					if (process.stdin.isTTY) process.stdin.setRawMode(false);
-
 					lastAgentOption = defaultOption;
 					clearScreen();
-					console.log(chalk.bold(`Starting ${defaultOption.label} for ${selected.key}...`));
-					let launchFailed = false;
-					let launchErrorMessage = '';
+					console.log(chalk.bold(`Launching ${defaultOption.label} for ${selected.key} in background...`));
 
 					try {
 						const repoPaths = await resolveRepoPathsFromUser(selected.detail);
 						lastResolvedPaths = repoPaths;
-						await launchAgentForRepos(selected.detail, defaultOption, repoPaths);
+						await launchAgentInBackground(selected.detail, defaultOption, repoPaths);
+						await refreshJobStatuses();
+						console.log(chalk.green(`  ✓ ${defaultOption.label} launched in background for ${selected.key}`));
 					} catch (error) {
-						launchFailed = true;
-						launchErrorMessage = error instanceof Error ? error.message : String(error);
-					} finally {
-						if (process.stdin.isTTY) process.stdin.setRawMode(true);
-						launchingAgent = false;
+						const msg = error instanceof Error ? error.message : String(error);
+						console.log(chalk.red(`  Failed to launch: ${msg}`));
 					}
 
-					inDetailView = true;
-					showPostAgentPrompt = true;
-					postAgentMessage = launchFailed
-						? chalk.red(`Failed to start ${defaultOption.label}: ${launchErrorMessage}`)
-						: chalk.green(`${defaultOption.label} finished. Review output and choose next step.`);
-					renderPostAgentPrompt(selected, postAgentMessage);
+					await new Promise((r) => setTimeout(r, 1500));
+					redrawList();
 					return;
 				}
 			}
