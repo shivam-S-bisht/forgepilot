@@ -13,6 +13,7 @@ export type JobRecord = {
 	ticketKey: string;
 	title: string;
 	agent: string;
+	agentOptionId?: string;
 	pid: number;
 	logFile: string;
 	status: JobStatus;

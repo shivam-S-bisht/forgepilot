@@ -185,6 +185,37 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				renderLogViewer(viewingJob!, lines);
 				return;
 			}
+			if (key.name === 'r' && viewingJob && (viewingJob.status === 'failed' || viewingJob.status === 'stopped')) {
+				const job = viewingJob;
+				closeLogViewer();
+				clearScreen();
+				console.log(chalk.bold(`Retrying ${job.ticketKey}...`));
+
+				const agentOpt = job.agentOptionId ? resolveAgentOptionById(job.agentOptionId) : null;
+				if (!agentOpt) {
+					console.log(chalk.red(`  Could not resolve agent "${job.agent}". Return to job list.`));
+					await new Promise((r) => setTimeout(r, 1500));
+					await openJobList();
+					return;
+				}
+
+				try {
+					const detail = await fetchIssueDetail(job.ticketKey);
+					const repoPaths = new Map<string, string>();
+					for (const p of job.repos) repoPaths.set(p, p);
+
+					await launchAgentInBackground(detail, agentOpt, repoPaths);
+					await refreshJobStatuses();
+					console.log(chalk.green(`  ✓ ${job.ticketKey} relaunched in background`));
+				} catch (error) {
+					const msg = error instanceof Error ? error.message : String(error);
+					console.log(chalk.red(`  Failed to retry: ${msg}`));
+				}
+
+				await new Promise((r) => setTimeout(r, 1500));
+				await openJobList();
+				return;
+			}
 			return;
 		}
 

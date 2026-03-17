@@ -444,6 +444,7 @@ export async function runCommandBackground(
 	title: string,
 	repos: string[],
 	cwd?: string,
+	agentOptionId?: string,
 ): Promise<JobRecord> {
 	const logFile = getLogFilePath(ticketKey);
 	const logFd = await fsOpen(logFile, 'w');
@@ -460,6 +461,7 @@ export async function runCommandBackground(
 		ticketKey,
 		title,
 		agent: toolName,
+		agentOptionId,
 		pid: child.pid!,
 		logFile,
 		status: 'running',
@@ -1097,6 +1099,7 @@ export async function launchAgentInBackground(
 		ticketTitle,
 		paths,
 		effectivePath,
+		agentOption.id,
 	);
 
 	startAxonWatch(effectivePath);
