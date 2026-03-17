@@ -187,23 +187,32 @@ async function runCustomTaskFlow(): Promise<void> {
 		console.log(chalk.gray(`Using default agent: ${agentOption.label}`));
 	}
 
-	const autoSlug = description
+	const slug = description
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, '-')
 		.replace(/^-|-$/g, '')
 		.slice(0, 15);
+	const lowerDesc = description.toLowerCase();
+	const branchPrefix = /\b(fix|bug|patch|hotfix|issue)\b/.test(lowerDesc) ? 'fix'
+		: /\b(refactor|clean|restructure|reorgani[sz]e)\b/.test(lowerDesc) ? 'refactor'
+		: /\b(chore|update|upgrade|bump|config|ci|cd)\b/.test(lowerDesc) ? 'chore'
+		: /\b(docs?|readme|documentation)\b/.test(lowerDesc) ? 'docs'
+		: /\b(test|spec|coverage)\b/.test(lowerDesc) ? 'test'
+		: /\b(perf|optimi[sz]e|speed|fast)\b/.test(lowerDesc) ? 'perf'
+		: 'feat';
+	const autoBranch = `${branchPrefix}/${slug}`;
 	const BRANCH_OPTIONS: ScopeOption[] = [
-		{ id: 'auto', label: `Use auto-generated: custom/${autoSlug}`, description: 'Short branch name derived from your description.' },
-		{ id: 'custom', label: 'Enter a custom branch name', description: 'Type your own branch name (will be prefixed with custom/).' },
+		{ id: 'auto', label: `Use: ${autoBranch}`, description: `Auto-detected as "${branchPrefix}" from your description.` },
+		{ id: 'custom', label: 'Enter a custom branch name', description: 'Type your own branch name (e.g. feat/my-feature).' },
 	];
 	const branchChoice = await pickSingleOption(BRANCH_OPTIONS, 0, 'Branch Name', 'Choose a branch name for this task:');
 	let branchName: string;
 	if (branchChoice === 'custom') {
-		const input = await askUser(chalk.cyan('  Enter branch name (without custom/ prefix): '));
-		const sanitized = (input || autoSlug).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
-		branchName = `custom/${sanitized || autoSlug}`;
+		const input = await askUser(chalk.cyan('  Enter branch name: '));
+		const sanitized = (input || autoBranch).trim().replace(/[^a-z0-9/\-]+/gi, '-').replace(/^[-/]+|[-/]+$/g, '');
+		branchName = sanitized || autoBranch;
 	} else {
-		branchName = `custom/${autoSlug}`;
+		branchName = autoBranch;
 	}
 
 	const projectKey = process.env.FORGEPILOT_JIRA_PROJECT_KEY?.trim();
