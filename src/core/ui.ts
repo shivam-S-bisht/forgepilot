@@ -8,7 +8,7 @@ import {
 	linkedIssuesText,
 } from '../tools/jira/jira-text.js';
 import type { TicketRunStatus, TicketView, WorkAgentOption } from './types.js';
-import type { JobStatus } from './job-manager.js';
+import type { JobRecord, JobStatus } from './job-manager.js';
 
 const LIST_PAGE_SIZE = 20;
 
@@ -143,8 +143,8 @@ export function renderList(
 		),
 	);
 	const keyHints = checkedIndices
-		? 'Keys: ↑/↓ navigate, Space toggle, a select all, Enter details, w work on selected, q quit'
-		: 'Keys: ↑/↓ navigate, Space toggle, Enter details, m load more, q quit';
+		? 'Keys: ↑/↓ navigate, Space toggle, a select all, Enter details, w work, l jobs, q quit'
+		: 'Keys: ↑/↓ navigate, Space toggle, Enter details, m more, l jobs, q quit';
 	console.log(chalk.gray(keyHints));
 	console.log(chalk.gray('='.repeat(90)));
 
@@ -343,6 +343,59 @@ export function renderMultiAgentPicker(
 		const desc = chalk.gray(option.description);
 		console.log(`${pointer} ${label}`);
 		console.log(`  ${desc}`);
+	}
+	console.log(chalk.gray('-'.repeat(90)));
+}
+
+const LOG_TAIL_LINES = 30;
+
+export function renderLogViewer(job: JobRecord, logLines: string[]) {
+	clearScreen();
+	const statusBadge = jobStatusBadge(job.status);
+	console.log(chalk.bold(`${job.ticketKey}: ${job.title}`));
+	console.log(`  Agent: ${chalk.cyan(job.agent)}  |  Status: ${statusBadge}  |  PID: ${job.pid}`);
+	console.log(chalk.gray(`  Log: ${job.logFile}`));
+	console.log(chalk.gray('='.repeat(90)));
+
+	const tail = logLines.slice(-LOG_TAIL_LINES);
+	if (tail.length === 0) {
+		console.log(chalk.gray('  (no output yet)'));
+	} else {
+		for (const line of tail) {
+			console.log(chalk.white(`  ${line}`));
+		}
+	}
+
+	console.log(chalk.gray('='.repeat(90)));
+	const actions: string[] = ['q/Esc back'];
+	if (job.status === 'running') {
+		actions.push('s stop agent');
+	}
+	if (job.status === 'failed' || job.status === 'stopped') {
+		actions.push('r retry/resume');
+	}
+	console.log(chalk.gray(`  Keys: ${actions.join('  |  ')}`));
+}
+
+export function renderJobList(jobs: JobRecord[], selectedIndex: number) {
+	clearScreen();
+	console.log(chalk.bold('Background Jobs'));
+	console.log(chalk.gray('Keys: ↑/↓ navigate, Enter view logs, q back'));
+	console.log(chalk.gray('='.repeat(90)));
+
+	if (!jobs.length) {
+		console.log(chalk.gray('  No background jobs.'));
+		console.log(chalk.gray('='.repeat(90)));
+		return;
+	}
+
+	for (let i = 0; i < jobs.length; i++) {
+		const j = jobs[i];
+		const pointer = i === selectedIndex ? chalk.bold.cyan('▶') : ' ';
+		const badge = jobStatusBadge(j.status);
+		const key = i === selectedIndex ? chalk.bold.white(j.ticketKey) : chalk.white(j.ticketKey);
+		const title = i === selectedIndex ? chalk.bold(j.title) : chalk.gray(j.title);
+		console.log(`${pointer} ${badge}  ${key}  ${title}`);
 	}
 	console.log(chalk.gray('-'.repeat(90)));
 }

@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import fs from 'node:fs/promises';
 import readline from 'node:readline';
 import chalk from 'chalk';
 import {
@@ -25,7 +27,10 @@ import {
 	renderMultiTicketDashboard,
 	renderMultiTicketSummary,
 	renderPostAgentPrompt,
+	renderJobList,
+	renderLogViewer,
 } from './ui.js';
+import { getJob, stopJob } from './job-manager.js';
 
 const INTERACTIVE_AGENT_IDS = new Set(['copilot-interactive', 'claude-code-interactive']);
 
@@ -51,6 +56,12 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let loadingMore = false;
 	let launchingAgent = false;
 	let expandedScope = false;
+	let inJobList = false;
+	let inLogViewer = false;
+	let jobListItems: import('./job-manager.js').JobRecord[] = [];
+	let selectedJobIndex = 0;
+	let viewingJob: import('./job-manager.js').JobRecord | null = null;
+	let logTailInterval: ReturnType<typeof setInterval> | null = null;
 	const checkedIndices = new Set<number>();
 	const jobStatusMap = new Map<string, JobStatus>();
 
@@ -73,11 +84,56 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	}
 
 	const cleanup = () => {
+		if (logTailInterval) {
+			clearInterval(logTailInterval);
+			logTailInterval = null;
+		}
 		if (process.stdin.isTTY) {
 			process.stdin.setRawMode(false);
 		}
 		process.stdin.removeAllListeners('keypress');
 	};
+
+	async function readLogTail(filePath: string, lines = 30): Promise<string[]> {
+		if (!existsSync(filePath)) return [];
+		try {
+			const content = await fs.readFile(filePath, 'utf8');
+			return content.split('\n').slice(-lines);
+		} catch {
+			return [];
+		}
+	}
+
+	async function openJobList(): Promise<void> {
+		jobListItems = await getJobs();
+		selectedJobIndex = 0;
+		inJobList = true;
+		renderJobList(jobListItems, selectedJobIndex);
+	}
+
+	async function openLogViewer(job: import('./job-manager.js').JobRecord): Promise<void> {
+		viewingJob = job;
+		inLogViewer = true;
+		inJobList = false;
+		const lines = await readLogTail(job.logFile);
+		renderLogViewer(job, lines);
+		logTailInterval = setInterval(async () => {
+			if (!inLogViewer || !viewingJob) return;
+			const freshJob = await getJob(viewingJob.id);
+			if (freshJob) viewingJob = freshJob;
+			const freshLines = await readLogTail(viewingJob.logFile);
+			renderLogViewer(viewingJob, freshLines);
+		}, 2000);
+	}
+
+	function closeLogViewer(): void {
+		if (logTailInterval) {
+			clearInterval(logTailInterval);
+			logTailInterval = null;
+		}
+		viewingJob = null;
+		inLogViewer = false;
+	}
 
 	const redrawList = () => renderList(tickets, selectedIndex, expandedScope, checkedIndices, jobStatusMap);
 
@@ -87,6 +143,47 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		if (key.ctrl && key.name === 'c') {
 			cleanup();
 			process.exit(0);
+		}
+
+		if (inLogViewer) {
+			if (key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
+				closeLogViewer();
+				await openJobList();
+				return;
+			}
+			if (key.name === 's' && viewingJob?.status === 'running') {
+				await stopJob(viewingJob.id);
+				const freshJob = await getJob(viewingJob.id);
+				if (freshJob) viewingJob = freshJob;
+				const lines = await readLogTail(viewingJob!.logFile);
+				renderLogViewer(viewingJob!, lines);
+				return;
+			}
+			return;
+		}
+
+		if (inJobList) {
+			if (key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
+				inJobList = false;
+				await refreshJobStatuses();
+				redrawList();
+				return;
+			}
+			if (key.name === 'up' && jobListItems.length) {
+				selectedJobIndex = selectedJobIndex === 0 ? jobListItems.length - 1 : selectedJobIndex - 1;
+				renderJobList(jobListItems, selectedJobIndex);
+				return;
+			}
+			if (key.name === 'down' && jobListItems.length) {
+				selectedJobIndex = selectedJobIndex === jobListItems.length - 1 ? 0 : selectedJobIndex + 1;
+				renderJobList(jobListItems, selectedJobIndex);
+				return;
+			}
+			if ((key.name === 'return' || key.name === 'enter') && jobListItems.length) {
+				await openLogViewer(jobListItems[selectedJobIndex]);
+				return;
+			}
+			return;
 		}
 
 		if (showMultiSummary) {
@@ -491,6 +588,11 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		if (key.name === 'q') {
 			cleanup();
 			process.exit(0);
+		}
+
+		if (key.name === 'l' && !loadingDetail && !loadingMore && !launchingAgent) {
+			await openJobList();
+			return;
 		}
 
 		if (key.name === 'space' && !loadingDetail && !loadingMore && !launchingAgent && tickets.length) {
