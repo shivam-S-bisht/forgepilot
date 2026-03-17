@@ -16,6 +16,11 @@ function askLine(prompt: string, prefill = ''): Promise<string> {
 	return new Promise((resolve) =>
 		rl.question(prompt, (answer) => {
 			rl.close();
+			// rl.close() can end/unpause stdin; resume it so subsequent
+			// keypress listeners and raw-mode handlers still work.
+			if (process.stdin.readable) {
+				process.stdin.resume();
+			}
 			resolve(answer.trim());
 		}),
 	);
