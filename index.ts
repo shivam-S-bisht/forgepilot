@@ -187,12 +187,24 @@ async function runCustomTaskFlow(): Promise<void> {
 		console.log(chalk.gray(`Using default agent: ${agentOption.label}`));
 	}
 
-	const branchSlug = description
+	const autoSlug = description
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, '-')
 		.replace(/^-|-$/g, '')
-		.slice(0, 50);
-	const branchName = `custom/${branchSlug}`;
+		.slice(0, 15);
+	const BRANCH_OPTIONS: ScopeOption[] = [
+		{ id: 'auto', label: `Use auto-generated: custom/${autoSlug}`, description: 'Short branch name derived from your description.' },
+		{ id: 'custom', label: 'Enter a custom branch name', description: 'Type your own branch name (will be prefixed with custom/).' },
+	];
+	const branchChoice = await pickSingleOption(BRANCH_OPTIONS, 0, 'Branch Name', 'Choose a branch name for this task:');
+	let branchName: string;
+	if (branchChoice === 'custom') {
+		const input = await askUser(chalk.cyan('  Enter branch name (without custom/ prefix): '));
+		const sanitized = (input || autoSlug).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
+		branchName = `custom/${sanitized || autoSlug}`;
+	} else {
+		branchName = `custom/${autoSlug}`;
+	}
 
 	const projectKey = process.env.FORGEPILOT_JIRA_PROJECT_KEY?.trim();
 	if (projectKey) {
