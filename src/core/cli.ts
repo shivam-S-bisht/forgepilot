@@ -8,6 +8,7 @@ import {
 	launchAgentForRepos,
 	launchAgentInBackground,
 	launchMultipleTickets,
+	launchMultipleTicketsInBackground,
 	resolveAgentOptionById,
 } from './agents.js';
 import { getJobs, cleanupStaleJobs, isTicketRunning } from './job-manager.js';
@@ -275,7 +276,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 						if (process.stdin.isTTY) process.stdin.setRawMode(false);
 
 						clearScreen();
-						console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+						console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
 						const details = await Promise.all(
 							selectedTickets.map(async (t) => {
@@ -299,16 +300,14 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 							return;
 						}
 
-						lastMultiStatuses = await launchMultipleTickets(
-							validDetails,
-							defaultOption,
-							(statuses) => renderMultiTicketDashboard(statuses),
-						);
+						await launchMultipleTicketsInBackground(validDetails, defaultOption);
 
 						if (process.stdin.isTTY) process.stdin.setRawMode(true);
 						launchingAgent = false;
-						showMultiSummary = true;
-						renderMultiTicketSummary(lastMultiStatuses);
+						inMultiBrief = false;
+						await refreshJobStatuses();
+						await new Promise((r) => setTimeout(r, 1500));
+						redrawList();
 						return;
 					}
 				}
@@ -567,11 +566,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				const selectedOption = agentOptions[selectedAgentIndex];
 
 				inMultiAgentPicker = false;
-				launchingAgent = true;
-				if (process.stdin.isTTY) process.stdin.setRawMode(false);
 
 				clearScreen();
-				console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+				console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
 				const details = await Promise.all(
 					selectedTickets.map(async (t) => {
@@ -589,22 +586,15 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				if (!validDetails.length) {
 					clearScreen();
 					console.log(chalk.red('Could not load details for any selected ticket.'));
-					if (process.stdin.isTTY) process.stdin.setRawMode(true);
-					launchingAgent = false;
 					redrawList();
 					return;
 				}
 
-				lastMultiStatuses = await launchMultipleTickets(
-					validDetails,
-					selectedOption,
-					(statuses) => renderMultiTicketDashboard(statuses),
-				);
+				await launchMultipleTicketsInBackground(validDetails, selectedOption);
 
-				if (process.stdin.isTTY) process.stdin.setRawMode(true);
-				launchingAgent = false;
-				showMultiSummary = true;
-				renderMultiTicketSummary(lastMultiStatuses);
+				await refreshJobStatuses();
+				await new Promise((r) => setTimeout(r, 1500));
+				redrawList();
 				return;
 			}
 			return;
@@ -643,11 +633,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				const defaultOption = resolveAgentOptionById(defaultAgentId);
 				if (defaultOption && !INTERACTIVE_AGENT_IDS.has(defaultOption.id)) {
 					const selectedTickets = [...checkedIndices].map((i) => tickets[i]);
-					launchingAgent = true;
-					if (process.stdin.isTTY) process.stdin.setRawMode(false);
 
 					clearScreen();
-					console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+					console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
 					const details = await Promise.all(
 						selectedTickets.map(async (t) => {
@@ -665,22 +653,15 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					if (!validDetails.length) {
 						clearScreen();
 						console.log(chalk.red('Could not load details for any selected ticket.'));
-						if (process.stdin.isTTY) process.stdin.setRawMode(true);
-						launchingAgent = false;
 						redrawList();
 						return;
 					}
 
-					lastMultiStatuses = await launchMultipleTickets(
-						validDetails,
-						defaultOption,
-						(statuses) => renderMultiTicketDashboard(statuses),
-					);
+					await launchMultipleTicketsInBackground(validDetails, defaultOption);
 
-					if (process.stdin.isTTY) process.stdin.setRawMode(true);
-					launchingAgent = false;
-					showMultiSummary = true;
-					renderMultiTicketSummary(lastMultiStatuses);
+					await refreshJobStatuses();
+					await new Promise((r) => setTimeout(r, 1500));
+					redrawList();
 					return;
 				}
 			}
@@ -760,11 +741,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					if (defaultAgentId) {
 						const defaultOption = resolveAgentOptionById(defaultAgentId);
 						if (defaultOption && !INTERACTIVE_AGENT_IDS.has(defaultOption.id)) {
-							launchingAgent = true;
-							if (process.stdin.isTTY) process.stdin.setRawMode(false);
-
 							clearScreen();
-							console.log(chalk.bold(`Loading details for ${selectedTickets.length} ticket(s)...`));
+							console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
 							const details = await Promise.all(
 								selectedTickets.map(async (t) => {
@@ -782,22 +760,15 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 							if (!validDetails.length) {
 								clearScreen();
 								console.log(chalk.red('Could not load details for any selected ticket.'));
-								if (process.stdin.isTTY) process.stdin.setRawMode(true);
-								launchingAgent = false;
 								redrawList();
 								return;
 							}
 
-							lastMultiStatuses = await launchMultipleTickets(
-								validDetails,
-								defaultOption,
-								(statuses) => renderMultiTicketDashboard(statuses),
-							);
+							await launchMultipleTicketsInBackground(validDetails, defaultOption);
 
-							if (process.stdin.isTTY) process.stdin.setRawMode(true);
-							launchingAgent = false;
-							showMultiSummary = true;
-							renderMultiTicketSummary(lastMultiStatuses);
+							await refreshJobStatuses();
+							await new Promise((r) => setTimeout(r, 1500));
+							redrawList();
 							return;
 						}
 					}

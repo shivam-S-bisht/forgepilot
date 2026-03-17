@@ -1358,6 +1358,48 @@ export async function launchMultipleTickets(
 	return statuses;
 }
 
+export async function launchMultipleTicketsInBackground(
+	details: JiraIssueDetail[],
+	agentOption: WorkAgentOption,
+): Promise<JobRecord[]> {
+	const resolutions = await resolveRepoPathsForMultipleTickets(details);
+
+	const jobs: JobRecord[] = [];
+
+	for (const detail of details) {
+		const resolution = resolutions.get(detail.key);
+		if (!resolution) continue;
+
+		const paths = [...resolution.repoPaths.values()];
+		const repoPaths = resolution.repoPaths;
+
+		try {
+			const job = await launchAgentInBackground(detail, agentOption, repoPaths);
+			jobs.push(job);
+			console.log(chalk.green(`  ✓ ${detail.key} launched in background (PID ${job.pid})`));
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			console.log(chalk.red(`  ✗ ${detail.key} failed to launch: ${msg}`));
+			await registerJob({
+				id: detail.key,
+				ticketKey: detail.key,
+				title: String(detail.fields.summary ?? detail.key),
+				agent: agentOption.label,
+				pid: 0,
+				logFile: getLogFilePath(detail.key),
+				status: 'failed',
+				error: msg,
+				startedAt: new Date().toISOString(),
+				finishedAt: new Date().toISOString(),
+				repos: paths,
+				effectivePaths: [],
+			});
+		}
+	}
+
+	return jobs;
+}
+
 export async function launchAgentForCustomTask(
 	taskDescription: string,
 	branchName: string,
