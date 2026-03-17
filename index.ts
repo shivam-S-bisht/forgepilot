@@ -51,15 +51,20 @@ function getEnvScope(): TicketScope | undefined {
 	return undefined;
 }
 
-function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
+function pickSingleOption(
+	options: ScopeOption[],
+	defaultIndex = 0,
+	title?: string,
+	subtitle?: string,
+): Promise<string> {
 	return new Promise((resolve) => {
-		const defaultIndex = cachedScope ? SCOPE_OPTIONS.findIndex((o) => o.id === cachedScope) : 0;
 		let selectedIndex = defaultIndex >= 0 ? defaultIndex : 0;
 
 		readline.emitKeypressEvents(process.stdin);
 		if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-		renderScopePicker(SCOPE_OPTIONS, selectedIndex);
+		const render = () => renderScopePicker(options, selectedIndex, title, subtitle);
+		render();
 
 		const onKeypress = (_: unknown, key: readline.Key) => {
 			if (key.ctrl && key.name === 'c') {
@@ -69,26 +74,31 @@ function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
 			}
 
 			if (key.name === 'up') {
-				selectedIndex = selectedIndex === 0 ? SCOPE_OPTIONS.length - 1 : selectedIndex - 1;
-				renderScopePicker(SCOPE_OPTIONS, selectedIndex);
+				selectedIndex = selectedIndex === 0 ? options.length - 1 : selectedIndex - 1;
+				render();
 				return;
 			}
 
 			if (key.name === 'down') {
-				selectedIndex = selectedIndex === SCOPE_OPTIONS.length - 1 ? 0 : selectedIndex + 1;
-				renderScopePicker(SCOPE_OPTIONS, selectedIndex);
+				selectedIndex = selectedIndex === options.length - 1 ? 0 : selectedIndex + 1;
+				render();
 				return;
 			}
 
 			if (key.name === 'return' || key.name === 'enter') {
 				if (process.stdin.isTTY) process.stdin.setRawMode(false);
 				process.stdin.removeListener('keypress', onKeypress);
-				resolve(SCOPE_OPTIONS[selectedIndex].id as TicketScope);
+				resolve(options[selectedIndex].id);
 			}
 		};
 
 		process.stdin.on('keypress', onKeypress);
 	});
+}
+
+function pickScope(cachedScope: TicketScope | null): Promise<TicketScope> {
+	const defaultIndex = cachedScope ? SCOPE_OPTIONS.findIndex((o) => o.id === cachedScope) : 0;
+	return pickSingleOption(SCOPE_OPTIONS, defaultIndex) as Promise<TicketScope>;
 }
 
 function printActiveConfig() {
@@ -227,10 +237,11 @@ async function main() {
 		const defaultAgentId = getDefaultAgentId();
 
 		if (!auto && !isSlackFullFlowEnabled()) {
-			const workMode = await askUserChoice('How would you like to start?', [
-				{ id: 'ticket', label: 'Work from a Jira ticket' },
-				{ id: 'custom', label: 'Work from a description (no ticket needed)' },
-			]);
+			const WORK_MODE_OPTIONS: ScopeOption[] = [
+				{ id: 'ticket', label: 'Work from a Jira ticket', description: 'Pick a ticket from your board and let an agent implement it.' },
+				{ id: 'custom', label: 'Work from a description', description: 'Describe a task in plain text — no Jira ticket needed.' },
+			];
+			const workMode = await pickSingleOption(WORK_MODE_OPTIONS, 0, 'ForgePilot', 'How would you like to start?');
 			if (workMode === 'custom') {
 				await runCustomTaskFlow();
 				return;

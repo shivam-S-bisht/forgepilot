@@ -19,10 +19,15 @@ export interface ScopeOption {
 	description: string;
 }
 
-export function renderScopePicker(options: ScopeOption[], selectedIndex: number) {
+export function renderScopePicker(
+	options: ScopeOption[],
+	selectedIndex: number,
+	title = 'ForgePilot',
+	subtitle = 'Which tickets do you want to work with?',
+) {
 	clearScreen();
-	console.log(chalk.bold('ForgePilot'));
-	console.log(chalk.gray('Which tickets do you want to work with?'));
+	console.log(chalk.bold(title));
+	if (subtitle) console.log(chalk.gray(subtitle));
 	console.log(chalk.gray('Use ↑/↓ to navigate, Enter to select.'));
 	console.log(chalk.gray('='.repeat(60)));
 	console.log();
