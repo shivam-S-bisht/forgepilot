@@ -56,6 +56,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let loadingDetail = false;
 	let loadingMore = false;
 	let launchingAgent = false;
+	let isAwaitingInput = false;
 	let expandedScope = false;
 	let inJobList = false;
 	let inLogViewer = false;
@@ -146,7 +147,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 
 	const isMainListVisible = () =>
 		!inDetailView && !inAgentPicker && !inMultiAgentPicker && !inMultiBrief &&
-		!showPostAgentPrompt && !showMultiSummary && !inJobList && !inLogViewer && !launchingAgent;
+		!showPostAgentPrompt && !showMultiSummary && !inJobList && !inLogViewer && !launchingAgent && !isAwaitingInput;
 
 	statusRefreshInterval = setInterval(async () => {
 		const prevMap = new Map(jobStatusMap);
@@ -170,6 +171,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			cleanup();
 			process.exit(0);
 		}
+
+		if (isAwaitingInput) return;
 
 		if (inLogViewer) {
 			if (key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
@@ -199,6 +202,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					return;
 				}
 
+				isAwaitingInput = true;
+				if (process.stdin.isTTY) process.stdin.setRawMode(false);
 				try {
 					const detail = await fetchIssueDetail(job.ticketKey);
 					const repoPaths = new Map<string, string>();
@@ -210,6 +215,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);
 					console.log(chalk.red(`  Failed to retry: ${msg}`));
+				} finally {
+					isAwaitingInput = false;
+					if (process.stdin.isTTY) process.stdin.setRawMode(true);
 				}
 
 				await new Promise((r) => setTimeout(r, 1500));
@@ -304,41 +312,44 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					const defaultOption = resolveAgentOptionById(defaultAgentId);
 					if (defaultOption && !INTERACTIVE_AGENT_IDS.has(defaultOption.id)) {
 						launchingAgent = true;
+						isAwaitingInput = true;
 						if (process.stdin.isTTY) process.stdin.setRawMode(false);
 
 						clearScreen();
 						console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
-						const details = await Promise.all(
-							selectedTickets.map(async (t) => {
-								if (t.detail) return t.detail;
-								try {
-									t.detail = await fetchIssueDetail(t.key);
-									return t.detail;
-								} catch {
-									return null;
-								}
-							}),
-						);
+						try {
+							const details = await Promise.all(
+								selectedTickets.map(async (t) => {
+									if (t.detail) return t.detail;
+									try {
+										t.detail = await fetchIssueDetail(t.key);
+										return t.detail;
+									} catch {
+										return null;
+									}
+								}),
+							);
 
-						const validDetails = details.filter((d) => d !== null);
-						if (!validDetails.length) {
-							clearScreen();
-							console.log(chalk.red('Could not load details for any selected ticket.'));
+							const validDetails = details.filter((d) => d !== null);
+							if (!validDetails.length) {
+								clearScreen();
+								console.log(chalk.red('Could not load details for any selected ticket.'));
+								redrawList();
+								return;
+							}
+
+							await launchMultipleTicketsInBackground(validDetails, defaultOption);
+
+							inMultiBrief = false;
+							await refreshJobStatuses();
+							await new Promise((r) => setTimeout(r, 1500));
+							redrawList();
+						} finally {
 							if (process.stdin.isTTY) process.stdin.setRawMode(true);
 							launchingAgent = false;
-							redrawList();
-							return;
+							isAwaitingInput = false;
 						}
-
-						await launchMultipleTicketsInBackground(validDetails, defaultOption);
-
-						if (process.stdin.isTTY) process.stdin.setRawMode(true);
-						launchingAgent = false;
-						inMultiBrief = false;
-						await refreshJobStatuses();
-						await new Promise((r) => setTimeout(r, 1500));
-						redrawList();
 						return;
 					}
 				}
@@ -493,6 +504,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					clearScreen();
 					console.log(chalk.bold(`Launching ${selectedOption.label} for ${selectedTicket.key} in background...`));
 
+					isAwaitingInput = true;
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
 					try {
 						const repoPaths = await resolveRepoPathsFromUser(selectedDetail);
 						lastResolvedPaths = repoPaths;
@@ -502,6 +515,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					} catch (error) {
 						const msg = error instanceof Error ? error.message : String(error);
 						console.log(chalk.red(`  Failed to launch: ${msg}`));
+					} finally {
+						isAwaitingInput = false;
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
 					}
 
 					inDetailView = false;
@@ -536,6 +552,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 						clearScreen();
 						console.log(chalk.bold(`Launching ${defaultOption.label} for ${selected.key} in background...`));
 
+						isAwaitingInput = true;
+						if (process.stdin.isTTY) process.stdin.setRawMode(false);
 						try {
 							const repoPaths = await resolveRepoPathsFromUser(selected.detail);
 							lastResolvedPaths = repoPaths;
@@ -545,6 +563,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 						} catch (error) {
 							const msg = error instanceof Error ? error.message : String(error);
 							console.log(chalk.red(`  Failed to launch: ${msg}`));
+						} finally {
+							isAwaitingInput = false;
+							if (process.stdin.isTTY) process.stdin.setRawMode(true);
 						}
 
 						inDetailView = false;
@@ -601,31 +622,38 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 				clearScreen();
 				console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
-				const details = await Promise.all(
-					selectedTickets.map(async (t) => {
-						if (t.detail) return t.detail;
-						try {
-							t.detail = await fetchIssueDetail(t.key);
-							return t.detail;
-						} catch {
-							return null;
-						}
-					}),
-				);
+				isAwaitingInput = true;
+				if (process.stdin.isTTY) process.stdin.setRawMode(false);
+				try {
+					const details = await Promise.all(
+						selectedTickets.map(async (t) => {
+							if (t.detail) return t.detail;
+							try {
+								t.detail = await fetchIssueDetail(t.key);
+								return t.detail;
+							} catch {
+								return null;
+							}
+						}),
+					);
 
-				const validDetails = details.filter((d) => d !== null);
-				if (!validDetails.length) {
-					clearScreen();
-					console.log(chalk.red('Could not load details for any selected ticket.'));
+					const validDetails = details.filter((d) => d !== null);
+					if (!validDetails.length) {
+						clearScreen();
+						console.log(chalk.red('Could not load details for any selected ticket.'));
+						redrawList();
+						return;
+					}
+
+					await launchMultipleTicketsInBackground(validDetails, selectedOption);
+
+					await refreshJobStatuses();
+					await new Promise((r) => setTimeout(r, 1500));
 					redrawList();
-					return;
+				} finally {
+					isAwaitingInput = false;
+					if (process.stdin.isTTY) process.stdin.setRawMode(true);
 				}
-
-				await launchMultipleTicketsInBackground(validDetails, selectedOption);
-
-				await refreshJobStatuses();
-				await new Promise((r) => setTimeout(r, 1500));
-				redrawList();
 				return;
 			}
 			return;
@@ -668,31 +696,38 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					clearScreen();
 					console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
-					const details = await Promise.all(
-						selectedTickets.map(async (t) => {
-							if (t.detail) return t.detail;
-							try {
-								t.detail = await fetchIssueDetail(t.key);
-								return t.detail;
-							} catch {
-								return null;
-							}
-						}),
-					);
+					isAwaitingInput = true;
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+					try {
+						const details = await Promise.all(
+							selectedTickets.map(async (t) => {
+								if (t.detail) return t.detail;
+								try {
+									t.detail = await fetchIssueDetail(t.key);
+									return t.detail;
+								} catch {
+									return null;
+								}
+							}),
+						);
 
-					const validDetails = details.filter((d) => d !== null);
-					if (!validDetails.length) {
-						clearScreen();
-						console.log(chalk.red('Could not load details for any selected ticket.'));
+						const validDetails = details.filter((d) => d !== null);
+						if (!validDetails.length) {
+							clearScreen();
+							console.log(chalk.red('Could not load details for any selected ticket.'));
+							redrawList();
+							return;
+						}
+
+						await launchMultipleTicketsInBackground(validDetails, defaultOption);
+
+						await refreshJobStatuses();
+						await new Promise((r) => setTimeout(r, 1500));
 						redrawList();
-						return;
+					} finally {
+						isAwaitingInput = false;
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
 					}
-
-					await launchMultipleTicketsInBackground(validDetails, defaultOption);
-
-					await refreshJobStatuses();
-					await new Promise((r) => setTimeout(r, 1500));
-					redrawList();
 					return;
 				}
 			}
@@ -775,31 +810,38 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 							clearScreen();
 							console.log(chalk.bold(`Launching ${selectedTickets.length} ticket(s) in background...`));
 
-							const details = await Promise.all(
-								selectedTickets.map(async (t) => {
-									if (t.detail) return t.detail;
-									try {
-										t.detail = await fetchIssueDetail(t.key);
-										return t.detail;
-									} catch {
-										return null;
-									}
-								}),
-							);
+							isAwaitingInput = true;
+							if (process.stdin.isTTY) process.stdin.setRawMode(false);
+							try {
+								const details = await Promise.all(
+									selectedTickets.map(async (t) => {
+										if (t.detail) return t.detail;
+										try {
+											t.detail = await fetchIssueDetail(t.key);
+											return t.detail;
+										} catch {
+											return null;
+										}
+									}),
+								);
 
-							const validDetails = details.filter((d) => d !== null);
-							if (!validDetails.length) {
-								clearScreen();
-								console.log(chalk.red('Could not load details for any selected ticket.'));
+								const validDetails = details.filter((d) => d !== null);
+								if (!validDetails.length) {
+									clearScreen();
+									console.log(chalk.red('Could not load details for any selected ticket.'));
+									redrawList();
+									return;
+								}
+
+								await launchMultipleTicketsInBackground(validDetails, defaultOption);
+
+								await refreshJobStatuses();
+								await new Promise((r) => setTimeout(r, 1500));
 								redrawList();
-								return;
+							} finally {
+								isAwaitingInput = false;
+								if (process.stdin.isTTY) process.stdin.setRawMode(true);
 							}
-
-							await launchMultipleTicketsInBackground(validDetails, defaultOption);
-
-							await refreshJobStatuses();
-							await new Promise((r) => setTimeout(r, 1500));
-							redrawList();
 							return;
 						}
 					}
@@ -854,6 +896,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					clearScreen();
 					console.log(chalk.bold(`Launching ${defaultOption.label} for ${selected.key} in background...`));
 
+					isAwaitingInput = true;
+					if (process.stdin.isTTY) process.stdin.setRawMode(false);
 					try {
 						const repoPaths = await resolveRepoPathsFromUser(selected.detail);
 						lastResolvedPaths = repoPaths;
@@ -863,6 +907,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					} catch (error) {
 						const msg = error instanceof Error ? error.message : String(error);
 						console.log(chalk.red(`  Failed to launch: ${msg}`));
+					} finally {
+						isAwaitingInput = false;
+						if (process.stdin.isTTY) process.stdin.setRawMode(true);
 					}
 
 					await new Promise((r) => setTimeout(r, 1500));
