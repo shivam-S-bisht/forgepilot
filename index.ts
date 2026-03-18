@@ -209,7 +209,7 @@ async function runCustomTaskFlow(): Promise<void> {
 	let branchName: string;
 	if (branchChoice === 'custom') {
 		const input = await askUser(chalk.cyan('  Enter branch name: '));
-		const sanitized = (input || autoBranch).trim().replace(/[^a-z0-9/\-]+/gi, '-').replace(/^[-/]+|[-/]+$/g, '');
+		const sanitized = (input || autoBranch).trim().replace(/[^a-z0-9/-]+/gi, '-').replace(/^[-/]+|[-/]+$/g, '');
 		branchName = sanitized || autoBranch;
 	} else {
 		branchName = autoBranch;
