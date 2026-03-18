@@ -1600,6 +1600,24 @@ export async function launchAgentForCustomTask(
 		await promptMultiRepoBranchStrategy(paths, branchName);
 	}
 
+	console.log(chalk.gray('\n  Analyzing task and checking for clarifications...'));
+	const clarifications = await askCustomTaskClarifications(taskDescription, contributing ?? '');
+
+	let preApprovedPlan = false;
+	let approvedTodoItems: string[] = [];
+
+	console.log(chalk.gray('\n  Generating implementation plan...'));
+	const planItems = await generateCustomTodoPlan(taskDescription, contributing ?? '', clarifications);
+	if (planItems) {
+		const result = await reviewCustomTodoPlan(planItems, taskDescription, contributing ?? '', clarifications);
+		if (result.action === 'approve') {
+			approvedTodoItems = result.approved;
+			preApprovedPlan = true;
+		}
+	} else {
+		console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+	}
+
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for custom task "${branchName}" across ${paths.length} repo(s).`);
 
 	for (const repoPath of paths) {
@@ -1608,12 +1626,24 @@ export async function launchAgentForCustomTask(
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${branchName}...`));
 			const effectivePath = await prepareRepoForWork(repoPath, branchName);
 
+			if (preApprovedPlan && approvedTodoItems.length > 0) {
+				const todoPath = todoFilePath(effectivePath, branchName);
+				const todoContent = [
+					`# Custom Task: ${taskDescription.slice(0, 80)}`,
+					'',
+					...approvedTodoItems.map((item) => `- [ ] ${item}`),
+					'',
+				].join('\n');
+				await fs.writeFile(todoPath, todoContent, 'utf8');
+				console.log(chalk.green(`  ✓ Pre-approved plan written to ${path.basename(todoPath)}`));
+			}
+
 			const repoContributing = repoPath === paths[0] ? contributing : await readContributing(effectivePath);
 			const axonHint = getAxonPromptHint(effectivePath);
 			logAxonStatus(effectivePath);
 			axonChild = startAxonWatch(effectivePath);
 
-			const prompt = buildCustomTaskPrompt(taskDescription, branchName, repoContributing ?? '', axonHint);
+			const prompt = buildCustomTaskPrompt(taskDescription, branchName, repoContributing ?? '', axonHint, clarifications, preApprovedPlan);
 
 			console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath}...`));
 			await dispatchAgent(agentOption, prompt, effectivePath, '');
