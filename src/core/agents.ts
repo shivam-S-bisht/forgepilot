@@ -868,6 +868,190 @@ async function reviewTodoPlan(
 	return { approved: items, action: 'approve' };
 }
 
+async function generateCustomTodoPlan(
+	taskDescription: string,
+	contributing: string,
+	clarifications: string,
+	modifications?: string,
+): Promise<string[] | null> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+
+	const prompt = [
+		'You are a senior software engineer planning implementation tasks.',
+		'Generate a markdown checklist of implementation tasks for the following custom task.',
+		'',
+		'Output requirements:',
+		'- Return ONLY a markdown checklist (no explanation, no JSON, no code fences).',
+		'- Format: "- [ ] Task description" (one per line).',
+		'- Break work into small, logical, independently committable units.',
+		'- Order tasks by dependency (foundational work first).',
+		'- Include setup, implementation, tests, and cleanup steps as appropriate.',
+		'- Max 15 items.',
+		'',
+		`Task Description:\n${taskDescription.slice(0, 6000)}`,
+		contributing ? `\nContributing Guidelines:\n${contributing.slice(0, 2000)}` : '',
+		clarifications ? `\nUser Clarifications:\n${clarifications.slice(0, 2000)}` : '',
+		modifications ? `\nUser requested modifications:\n${modifications}` : '',
+	].filter(Boolean).join('\n');
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else {
+			return null;
+		}
+
+		const items = stdout
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.startsWith('- [ ]'))
+			.map((line) => line.replace(/^- \[ \]\s*/, '').trim())
+			.filter(Boolean);
+
+		return items.length > 0 ? items : null;
+	} catch {
+		return null;
+	}
+}
+
+async function reviewCustomTodoPlan(
+	items: string[],
+	taskDescription: string,
+	contributing: string,
+	clarifications: string,
+): Promise<{ approved: string[]; action: 'approve' | 'skip' }> {
+	const maxRounds = 5;
+
+	for (let round = 0; round < maxRounds; round++) {
+		console.log(chalk.bold.cyan(`\n  Proposed plan for custom task:\n`));
+		for (let i = 0; i < items.length; i++) {
+			console.log(chalk.white(`  ${i + 1}. ${items[i]}`));
+		}
+		console.log('');
+
+		if (isVoiceModeActive()) {
+			printAndSpeak(`${items.length} tasks planned. Review and approve, modify, or restart.`);
+		}
+
+		const choice = await askUserChoice('What would you like to do?', [
+			{ id: 'approve', label: 'Looks good — start coding' },
+			{ id: 'modify', label: 'Modify the plan — tell me what to change' },
+			{ id: 'restart', label: 'Start over — re-analyze from scratch' },
+			{ id: 'skip', label: 'Skip plan review — let the agent decide' },
+		]);
+
+		if (choice.startsWith('__unmatched__:')) {
+			const modifications = choice.slice('__unmatched__:'.length);
+			console.log(chalk.gray('  Treating your response as a plan modification...'));
+			if (isVoiceModeActive()) {
+				printAndSpeak('Updating the plan with your feedback.');
+			}
+			const updated = await generateCustomTodoPlan(taskDescription, contributing, clarifications, modifications);
+			if (updated) {
+				items = updated;
+			} else {
+				console.log(chalk.yellow('  Could not regenerate. Showing original plan.'));
+			}
+			continue;
+		}
+
+		if (choice === 'approve') {
+			return { approved: items, action: 'approve' };
+		}
+
+		if (choice === 'skip') {
+			return { approved: [], action: 'skip' };
+		}
+
+		if (choice === 'modify') {
+			const modifications = await askUser(chalk.cyan('  What should be changed? '));
+			if (!modifications) continue;
+
+			console.log(chalk.gray('  Regenerating plan with your modifications...'));
+			const updated = await generateCustomTodoPlan(taskDescription, contributing, clarifications, modifications);
+			if (updated) {
+				items = updated;
+			} else {
+				console.log(chalk.yellow('  Could not regenerate. Showing original plan.'));
+			}
+			continue;
+		}
+
+		if (choice === 'restart') {
+			console.log(chalk.gray('  Re-analyzing task from scratch...'));
+			const fresh = await generateCustomTodoPlan(taskDescription, contributing, clarifications);
+			if (fresh) {
+				items = fresh;
+			} else {
+				console.log(chalk.yellow('  Could not regenerate. Showing original plan.'));
+			}
+			continue;
+		}
+	}
+
+	return { approved: items, action: 'approve' };
+}
+
+async function askCustomTaskClarifications(
+	taskDescription: string,
+	contributing: string,
+): Promise<string> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+
+	const prompt = [
+		'You are a senior software engineer preparing to implement a task.',
+		'Analyze the task description and generate 1-3 clarifying questions that would help you implement it better.',
+		'',
+		'Output requirements:',
+		'- Return ONLY a JSON array of question strings.',
+		'- Each question should be concise (one sentence).',
+		'- Ask about ambiguities, missing details, or important decisions.',
+		'- If the task is clear enough, return an empty array: []',
+		'- Max 3 questions.',
+		'- Example: ["Should this support both iOS and Android?", "Which database should be used?"]',
+		'',
+		`Task Description:\n${taskDescription.slice(0, 4000)}`,
+		contributing ? `\nContributing Guidelines:\n${contributing.slice(0, 1000)}` : '',
+	].filter(Boolean).join('\n');
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else {
+			return '';
+		}
+
+		const jsonMatch = stdout.match(/\[[\s\S]*?\]/);
+		if (!jsonMatch) return '';
+
+		const questions = JSON.parse(jsonMatch[0]) as string[];
+		if (!Array.isArray(questions) || questions.length === 0) return '';
+
+		console.log(chalk.bold.yellow(`\n  ${questions.length} clarification(s) before starting:\n`));
+
+		if (isVoiceModeActive()) {
+			printAndSpeak(`${questions.length} clarification${questions.length === 1 ? '' : 's'} needed.`);
+		}
+
+		const answers: string[] = [];
+		for (let i = 0; i < questions.length; i++) {
+			console.log(chalk.white(`  ${i + 1}. ${questions[i]}`));
+			const answer = await askUser(chalk.cyan('     Answer: '));
+			answers.push(`Q: ${questions[i]}\nA: ${answer || '(no answer)'}`);
+		}
+
+		return answers.join('\n\n');
+	} catch {
+		return '';
+	}
+}
+
 export async function launchAgentForRepos(
 	detail: JiraIssueDetail,
 	agentOption: WorkAgentOption,
