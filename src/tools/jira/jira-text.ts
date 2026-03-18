@@ -407,6 +407,8 @@ export function buildCustomTaskPrompt(
 	branchName: string,
 	contributing = '',
 	axonHint = '',
+	clarifications = '',
+	preApprovedPlan = false,
 ): string {
 	const todoFile = `.forgepilot-todos-${branchName.toUpperCase()}.md`;
 	const sections: string[] = [];
@@ -425,6 +427,18 @@ export function buildCustomTaskPrompt(
 		'',
 	);
 
+	if (clarifications) {
+		sections.push(
+			'=== USER CLARIFICATIONS ===',
+			clarifications,
+			'',
+		);
+	}
+
+	const planStep = preApprovedPlan
+		? `3. PLAN — A pre-approved plan already exists in ${todoFile}. Read it and follow it exactly. Do NOT modify or regenerate the plan.`
+		: `3. PLAN — Create ${todoFile} with a checklist of implementation tasks.`;
+
 	sections.push(
 		'=== WORKFLOW ===',
 		'',
@@ -432,7 +446,7 @@ export function buildCustomTaskPrompt(
 		'',
 		'2. EXPLORE — Browse the codebase to understand the relevant areas.',
 		'',
-		`3. PLAN — Create ${todoFile} with a checklist of implementation tasks.`,
+		planStep,
 		'',
 		`4. IMPLEMENT — Work through each item in ${todoFile} one at a time:`,
 		'   a. Complete the task.',
