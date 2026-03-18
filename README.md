@@ -309,10 +309,12 @@ forgepilot
 
 This launches the interactive TUI:
 
-1. **Scope picker** — choose "Current Sprint" or "All Assigned Tickets"
-2. **Ticket list** — navigate with arrow keys, select with Space, Enter for details
-3. **Agent picker** — choose an AI agent to work on the ticket
-4. **Post-agent** — push branch, create MR/PR, or retry
+1. **Work mode** — choose "Work on a Jira ticket" or "Work from a description" (custom task)
+2. **Scope picker** (ticket mode) — choose "Current Sprint" or "All Assigned Tickets"
+3. **Ticket list** — navigate with arrow keys, select with Space, Enter for details
+4. **Clarifying questions & plan review** — AI asks questions and proposes a task plan for your approval
+5. **Agent launch** — agent runs in the background; TUI returns immediately
+6. **Jobs dashboard** — press **l** to monitor running agents, view logs, stop, or retry
 
 ## Interactive Controls
 
@@ -325,8 +327,11 @@ This launches the interactive TUI:
 | a | Select / deselect all tickets |
 | Enter | Open detail view (single) or brief summary (multi) |
 | w | Launch agent for selected ticket(s) |
+| l | Open background jobs list |
 | m | Load more tickets (expand scope) |
 | q | Quit |
+
+Tickets with active background agents show status badges: **AI Working**, **AI Done**, **AI Failed**, or **Stopped**. The list auto-refreshes every 5 seconds.
 
 ### Detail View
 
@@ -335,23 +340,43 @@ This launches the interactive TUI:
 | w | Choose AI agent and start work |
 | Esc/q | Back to ticket list |
 
-### Post-Agent
+### Background Jobs List
+
+Press **l** from the ticket list to view all background agent jobs.
 
 | Key | Action |
 |-----|--------|
-| p | Push branch and create MR/PR |
-| r | Retry same agent |
-| d | Back to ticket details |
-| b | Back to ticket list |
+| Up/Down | Navigate jobs |
+| Enter | Open live log viewer for selected job |
+| Esc/q | Back to ticket list |
 
-## Multi-Ticket Parallel Execution
+### Log Viewer
+
+| Key | Action |
+|-----|--------|
+| s | Stop a running agent |
+| r | Retry/resume a failed or stopped agent |
+| Esc/q | Back to jobs list |
+
+Logs auto-refresh every 2 seconds while viewing.
+
+## Background Agent Execution
+
+All agent launches (single-ticket and multi-ticket) run in the background. The TUI returns immediately so you can continue browsing tickets, launch more agents, or view logs.
+
+- Agents are spawned as detached child processes with output piped to log files
+- Job state is persisted to `.cache/jobs.json` and survives CLI restarts
+- Stale jobs (dead PIDs) are cleaned up automatically on startup
+- Press **l** to view all jobs, Enter to tail logs, **s** to stop, **r** to retry
+
+### Multi-Ticket Parallel Execution
 
 Select multiple tickets with **Space**, then press **Enter** or **w**:
 
 - Repos are resolved for all tickets at once
+- Each ticket's agent is launched in the background independently
 - When two tickets target the same repo, git worktrees provide isolated working directories
-- Agents run in parallel with a live dashboard showing progress
-- After completion, push branches and create MR/PRs for all successful tickets
+- Status badges on the ticket list show real-time progress
 
 ## Environment Variables
 
@@ -507,6 +532,16 @@ Voice mode uses AI to understand natural language. You don't need to memorize ex
 | "commit my changes" | Stage all + commit (speaks commit message prompt) |
 | "push and create PR" | Push branch and create MR/PR |
 
+**Background Jobs**
+
+| Say something like... | What it does |
+|----------------------|-------------|
+| "list jobs" / "show running agents" | List all background agent jobs with status |
+| "what's the status of CE-1234" / "job status" | Get status of a specific ticket's background job |
+| "show logs for CE-1234" / "view job logs" | Tail the last 20 lines of a job's log file |
+| "stop CE-1234" / "kill that job" | Stop a running background agent |
+| "retry CE-1234" / "rerun that job" | Re-launch a failed or stopped job |
+
 **Status & Review**
 
 | Say something like... | What it does |
@@ -626,13 +661,24 @@ When you select a ticket and launch an agent, ForgePilot:
 2. **Prepares the repo** — stashes changes, fetches latest, checks out base branch, creates a ticket branch (e.g. `CE-1234`)
 3. **Checks for checkpoints** — if a previous run was interrupted, detects the existing todo file and offers resume options (see below)
 4. **Runs preflight checks** — AI-powered analysis of the ticket for potential concerns, with Q&A via Slack or terminal
-5. **Fetches Figma designs** — if Figma links are found, fetches node structure, rendered images, and design tokens
-6. **Injects Axon context** — if an Axon knowledge graph exists in the repo, adds structural reasoning protocol to the prompt
-7. **Builds a rich prompt** — structured with role, task, workflow steps, ticket context, constraints, contributing guidelines, design context, and clarifications
-8. **Launches the AI agent** — in the repo directory with the full prompt
-9. **Transitions the ticket** — marks it "In Progress" in Jira
-10. **Notifies Slack** — sends status updates on start, completion, or failure
-11. **Post-agent options** — push branch, create MR/PR (auto-detects GitHub/GitLab), retry, or go back
+5. **Generates a plan** — AI creates a checklist of implementation tasks that you can approve, modify, restart, or skip
+6. **Fetches Figma designs** — if Figma links are found, fetches node structure, rendered images, and design tokens
+7. **Injects Axon context** — if an Axon knowledge graph exists in the repo, adds structural reasoning protocol to the prompt
+8. **Builds a rich prompt** — structured with role, task, workflow steps, ticket context, constraints, contributing guidelines, design context, and clarifications
+9. **Launches the AI agent in background** — spawns a detached process and returns to the TUI immediately
+10. **Transitions the ticket** — marks it "In Progress" in Jira
+11. **Notifies Slack** — sends status updates on start, completion, or failure
+
+### Custom Task Flow
+
+When you choose "Work from a description" instead of a Jira ticket:
+
+1. **Describe the task** — enter a plain-text description of what you want to build
+2. **Select repos** — pick from local repos (or let AI decide)
+3. **Choose agent and branch** — auto-detected branch prefix (feat/, fix/, etc.) or custom name
+4. **Clarifying questions** — AI analyzes your description and asks 1-3 questions to reduce ambiguity
+5. **Plan review** — AI generates a checklist that you can approve, modify, restart, or skip
+6. **Agent launch** — the agent runs with the approved plan and your clarifications baked into the prompt
 
 ### Checkpoint / Resume
 
@@ -692,6 +738,11 @@ ForgePilot includes an MCP (Model Context Protocol) server that exposes all its 
 | `get_checkpoint` | Load checkpoint metadata for a ticket (agent, timestamps, repo path) |
 | `clear_checkpoint` | Discard checkpoint and optionally the todo file for a ticket |
 | `get_review_comments` | Find open PR/MR and fetch unresolved review comments for a ticket |
+| `launch_background_agent` | Launch an AI agent in the background for a ticket (resolves repos, prepares branch, builds prompt) |
+| `list_jobs` | List all background agent jobs with status |
+| `get_job_status` | Get detailed status for a specific ticket's job |
+| `stop_job` | Stop a running background agent |
+| `get_job_logs` | Retrieve the last N lines of a job's log file |
 | `start_voice_mode` | Start AI-powered voice mode with natural language understanding (requires `sherpa-onnx-node`, `sox`, and `copilot`/`cursor` CLI) |
 
 ### Setup for Cursor
