@@ -75,7 +75,8 @@ export type TodoProgress = {
 };
 
 function todoFilePath(repoPath: string, ticketKey: string): string {
-	return path.join(repoPath, `.forgepilot-todos-${ticketKey.toUpperCase()}.md`);
+	const safeKey = ticketKey.toUpperCase().replace(/[/\\]/g, '-');
+	return path.join(repoPath, `.forgepilot-todos-${safeKey}.md`);
 }
 
 function checkpointCacheKey(ticketKey: string): string {
