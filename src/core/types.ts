@@ -55,7 +55,8 @@ export type WorkAgentOption = {
 		| 'codex-full-auto'
 		| 'aider-autonomous'
 		| 'opencode-autonomous'
-		| 'cline-autonomous';
+		| 'cline-autonomous'
+		| 'ollama-local';
 	label: string;
 	description: string;
 };

@@ -21,6 +21,15 @@ import { getLogFilePath, registerJob, updateJob } from './job-manager.js';
 import type { JobRecord } from './job-manager.js';
 import { askUser, askUserChoice } from './ask.js';
 import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
+import {
+	isOllamaInstalled,
+	ensureOllamaServing,
+	listOllamaModels,
+	pullOllamaModel,
+	getOllamaApiBase,
+	getConfiguredModel,
+	getRecommendedModel,
+} from '../tools/ollama/ollama.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -413,8 +422,12 @@ async function cleanupQuestionFiles(repoPath: string): Promise<void> {
 }
 
 async function runCommandInteractive(command: string, args: string[], toolName: string, cwd?: string): Promise<void> {
+	await runCommandInteractiveWithEnv(command, args, toolName, cwd);
+}
+
+async function runCommandInteractiveWithEnv(command: string, args: string[], toolName: string, cwd?: string, env?: NodeJS.ProcessEnv): Promise<void> {
 	await new Promise<void>((resolve, reject) => {
-		const child = spawn(command, args, { stdio: 'inherit', ...(cwd ? { cwd } : {}) });
+		const child = spawn(command, args, { stdio: 'inherit', ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
 		child.on('error', (error: NodeJS.ErrnoException) => {
 			if (error?.code === 'ENOENT') {
 				reject(new Error(`${toolName} CLI is not installed or not in PATH.`));
@@ -423,8 +436,6 @@ async function runCommandInteractive(command: string, args: string[], toolName: 
 			reject(error);
 		});
 		child.on('exit', (code) => {
-			// After stdio: 'inherit' child exits, stdin may be paused/unref'd.
-			// Resume it so the Node.js event loop stays alive for the caller's keypress handlers.
 			if (process.stdin.readable) {
 				process.stdin.resume();
 			}
@@ -450,10 +461,15 @@ export async function runCommandBackground(
 	const logFile = getLogFilePath(ticketKey);
 	const logFd = await fsOpen(logFile, 'w');
 
+	const spawnEnv = agentOptionId === 'ollama-local'
+		? { ...process.env, OLLAMA_API_BASE: getOllamaApiBase() }
+		: undefined;
+
 	const child = spawn(command, args, {
 		stdio: ['ignore', logFd.fd, logFd.fd],
 		detached: true,
 		...(cwd ? { cwd } : {}),
+		...(spawnEnv ? { env: spawnEnv } : {}),
 	});
 	child.unref();
 
@@ -528,6 +544,10 @@ export function resolveAgentCommand(
 			return { command: 'cline', args: ['--yolo', prompt], toolName: 'Cline CLI' };
 		case 'rovo-autonomous':
 			return { command: 'acli', args: ['rovodev', 'run', '--yolo', '--jira', jiraUrl, prompt], toolName: 'Rovo' };
+		case 'ollama-local': {
+			const model = getConfiguredModel() ?? (agentOption as WorkAgentOption & { ollamaModel?: string }).ollamaModel ?? 'qwen2.5-coder:7b';
+			return { command: 'aider', args: ['--model', `ollama_chat/${model}`, '--message', prompt, '--yes', '--no-auto-commits'], toolName: `Ollama (${model})` };
+		}
 	}
 }
 
@@ -666,6 +686,12 @@ const ALL_AGENT_OPTIONS: (WorkAgentOption & { cli: string })[] = [
 		description: 'Runs acli rovodev with yolo mode.',
 		cli: 'acli',
 	},
+	{
+		id: 'ollama-local',
+		label: 'Ollama Local (via Aider)',
+		description: 'Runs a local Ollama model through aider. No cloud API needed.',
+		cli: 'aider',
+	},
 ];
 
 async function isCLIAvailable(command: string): Promise<boolean> {
@@ -682,9 +708,82 @@ export async function getAvailableAgentOptions(): Promise<WorkAgentOption[]> {
 	const results = await Promise.all(cliNames.map(async (cli) => ({ cli, available: await isCLIAvailable(cli) })));
 	const availableSet = new Set(results.filter((r) => r.available).map((r) => r.cli));
 
+	const ollamaAvailable = availableSet.has('aider') && await isOllamaInstalled();
+
 	return ALL_AGENT_OPTIONS
-		.filter((o) => availableSet.has(o.cli))
+		.filter((o) => {
+			if (o.id === 'ollama-local') return ollamaAvailable;
+			return availableSet.has(o.cli);
+		})
 		.map(({ cli: __, ...option }) => option);
+}
+
+export async function pickOllamaModel(): Promise<string | null> {
+	const configured = getConfiguredModel();
+	if (configured) {
+		console.log(chalk.gray(`  Using configured Ollama model: ${configured}`));
+		return configured;
+	}
+
+	const cached = await getCached<string>('ollamaModel');
+
+	if (!(await ensureOllamaServing())) {
+		console.log(chalk.red('  Could not start Ollama. Make sure it is installed (brew install ollama).'));
+		return null;
+	}
+
+	const models = await listOllamaModels();
+
+	if (!models.length) {
+		console.log(chalk.yellow('  No Ollama models installed.'));
+		const recommended = getRecommendedModel();
+		const pull = await askUserChoice(`Pull ${recommended}?`, [
+			{ id: 'yes', label: `Yes — pull ${recommended} (recommended for coding)` },
+			{ id: 'custom', label: 'Enter a different model name' },
+			{ id: 'cancel', label: 'Cancel — go back' },
+		]);
+
+		if (pull === 'cancel') return null;
+
+		let modelToPull = recommended;
+		if (pull === 'custom') {
+			modelToPull = await askUser(chalk.cyan('  Model name (e.g. codellama:13b): '));
+			if (!modelToPull.trim()) return null;
+		}
+
+		const success = await pullOllamaModel(modelToPull);
+		if (!success) return null;
+		await setCached('ollamaModel', modelToPull);
+		return modelToPull;
+	}
+
+	if (cached && models.some((m) => m.name === cached)) {
+		const reuse = await askUserChoice(`Last used model: ${cached}`, [
+			{ id: 'reuse', label: `Use ${cached} again` },
+			{ id: 'pick', label: 'Pick a different model' },
+		]);
+		if (reuse === 'reuse') return cached;
+	}
+
+	const modelChoices = models.map((m) => ({
+		id: m.name,
+		label: `${m.name} (${m.size})`,
+	}));
+	modelChoices.push({ id: '__pull__', label: 'Pull a new model...' });
+
+	const chosen = await askUserChoice('Select an Ollama model:', modelChoices);
+
+	if (chosen === '__pull__') {
+		const name = await askUser(chalk.cyan('  Model name (e.g. qwen2.5-coder:7b): '));
+		if (!name.trim()) return null;
+		const success = await pullOllamaModel(name.trim());
+		if (!success) return null;
+		await setCached('ollamaModel', name.trim());
+		return name.trim();
+	}
+
+	await setCached('ollamaModel', chosen);
+	return chosen;
 }
 
 async function dispatchAgent(
@@ -731,6 +830,13 @@ async function dispatchAgent(
 		case 'rovo-autonomous':
 			await runRovoForTicket(prompt, repoPath, jiraUrl);
 			break;
+		case 'ollama-local': {
+			const model = getConfiguredModel() ?? (agentOption as WorkAgentOption & { ollamaModel?: string }).ollamaModel ?? 'qwen2.5-coder:7b';
+			const args = ['--model', `ollama_chat/${model}`, '--message', prompt, '--yes', '--no-auto-commits'];
+			const env = { ...process.env, OLLAMA_API_BASE: getOllamaApiBase() };
+			await runCommandInteractiveWithEnv('aider', args, `Ollama (${model})`, repoPath, env);
+			break;
+		}
 	}
 }
 
@@ -1058,6 +1164,13 @@ export async function launchAgentForRepos(
 	agentOption: WorkAgentOption,
 	repoPaths: Map<string, string>,
 ): Promise<void> {
+	if (agentOption.id === 'ollama-local') {
+		await ensureOllamaServing();
+		const model = await pickOllamaModel();
+		if (!model) throw new Error('No Ollama model selected.');
+		(agentOption as WorkAgentOption & { ollamaModel: string }).ollamaModel = model;
+	}
+
 	const paths = [...repoPaths.values()];
 
 	const firstRepoContributing = await readContributing(paths[0]);
@@ -1274,7 +1387,15 @@ export async function launchAgentInBackground(
 		lastUpdatedAt: new Date().toISOString(),
 	});
 
-	const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+	let effectiveOption = agentOption;
+	if (agentOption.id === 'ollama-local') {
+		await ensureOllamaServing();
+		const model = await pickOllamaModel();
+		if (!model) throw new Error('No Ollama model selected.');
+		effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
+	}
+
+	const { command, args, toolName } = resolveAgentCommand(effectiveOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
 
 	const job = await runCommandBackground(
 		command,
@@ -1284,12 +1405,12 @@ export async function launchAgentInBackground(
 		ticketTitle,
 		paths,
 		effectivePath,
-		agentOption.id,
+		effectiveOption.id,
 	);
 
 	startAxonWatch(effectivePath);
 
-	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} in background (PID ${job.pid}).`);
+	await notifySlackStatus(`ForgePilot started ${effectiveOption.label} for ${detail.key} in background (PID ${job.pid}).`);
 
 	return job;
 }
@@ -1594,6 +1715,13 @@ export async function launchAgentForCustomTask(
 	agentOption: WorkAgentOption,
 	repoPaths: Map<string, string>,
 ): Promise<void> {
+	if (agentOption.id === 'ollama-local') {
+		await ensureOllamaServing();
+		const model = await pickOllamaModel();
+		if (!model) throw new Error('No Ollama model selected.');
+		(agentOption as WorkAgentOption & { ollamaModel: string }).ollamaModel = model;
+	}
+
 	const paths = [...repoPaths.values()];
 	const contributing = await readContributing(paths[0]);
 

@@ -3,14 +3,116 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { createRequire } from 'node:module';
 import { spawn, execFileSync, execSync, type ChildProcess } from 'node:child_process';
-import { unlinkSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, unlinkSync, existsSync, statSync } from 'node:fs';
 import chalk from 'chalk';
 
 const esmRequire = createRequire(import.meta.url);
 
-const SHERPA_MODEL_DIR = path.join(os.homedir(), '.forgepilot', 'sherpa-models', 'whisper-tiny.en');
+const SHERPA_MODELS_ROOT = path.join(os.homedir(), '.forgepilot', 'sherpa-models');
 const MIN_RECORDING_MS = 1000;
 const KEY_DEBOUNCE_MS = 500;
+
+type VoiceModelId = 'tiny.en' | 'small.en' | 'medium.en' | 'large-v3';
+
+type VoiceModelConfig = {
+	id: VoiceModelId;
+	dir: string;
+	prefix: string;
+	repo: string;
+	sizeLabel: string;
+};
+
+const VOICE_MODELS: VoiceModelConfig[] = [
+	{ id: 'tiny.en', dir: 'whisper-tiny.en', prefix: 'tiny.en', repo: 'csukuangfj/sherpa-onnx-whisper-tiny.en', sizeLabel: '~98 MB' },
+	{ id: 'small.en', dir: 'whisper-small.en', prefix: 'small.en', repo: 'csukuangfj/sherpa-onnx-whisper-small.en', sizeLabel: '~200 MB' },
+	{ id: 'medium.en', dir: 'whisper-medium.en', prefix: 'medium.en', repo: 'csukuangfj/sherpa-onnx-whisper-medium.en', sizeLabel: '~945 MB' },
+	{ id: 'large-v3', dir: 'whisper-large-v3', prefix: 'large-v3', repo: 'csukuangfj/sherpa-onnx-whisper-large-v3', sizeLabel: '~1.7 GB' },
+];
+
+function getSelectedModelId(): VoiceModelId {
+	const env = process.env.FORGEPILOT_VOICE_MODEL?.trim().toLowerCase();
+	if (env && VOICE_MODELS.some((m) => m.id === env)) return env as VoiceModelId;
+	return 'large-v3';
+}
+
+function getModelConfig(id?: VoiceModelId): VoiceModelConfig {
+	const modelId = id ?? getSelectedModelId();
+	return VOICE_MODELS.find((m) => m.id === modelId) ?? VOICE_MODELS[0];
+}
+
+function getModelDir(config: VoiceModelConfig): string {
+	return path.join(SHERPA_MODELS_ROOT, config.dir);
+}
+
+function getModelPaths(config: VoiceModelConfig): { encoder: string; decoder: string; tokens: string } {
+	const dir = getModelDir(config);
+	return {
+		encoder: path.join(dir, `${config.prefix}-encoder.int8.onnx`),
+		decoder: path.join(dir, `${config.prefix}-decoder.int8.onnx`),
+		tokens: path.join(dir, `${config.prefix}-tokens.txt`),
+	};
+}
+
+function isModelDownloaded(config: VoiceModelConfig): boolean {
+	const paths = getModelPaths(config);
+	return existsSync(paths.encoder) && existsSync(paths.decoder) && existsSync(paths.tokens);
+}
+
+function downloadFile(url: string, dest: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const child = spawn('curl', ['-L', '--progress-bar', '-o', dest, url], { stdio: 'inherit' });
+		child.on('close', (code) => resolve(code === 0));
+		child.on('error', () => resolve(false));
+	});
+}
+
+export async function ensureVoiceModel(): Promise<VoiceModelConfig | null> {
+	const config = getModelConfig();
+
+	if (isModelDownloaded(config)) return config;
+
+	console.log(chalk.bold(`\n  Whisper model "${config.id}" not found locally.`));
+	console.log(chalk.gray(`  Download size: ${config.sizeLabel}`));
+	console.log(chalk.gray(`  Location: ${getModelDir(config)}`));
+
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	const answer = await new Promise<string>((resolve) => {
+		rl.question(chalk.cyan('  Download now? [Y/n] '), (a) => { rl.close(); resolve(a.trim()); });
+	});
+	if (process.stdin.readable) process.stdin.resume();
+
+	if (answer.toLowerCase() === 'n') {
+		console.log(chalk.yellow('  Skipped. Voice mode requires a model to function.'));
+		return null;
+	}
+
+	const dir = getModelDir(config);
+	mkdirSync(dir, { recursive: true });
+
+	const baseUrl = `https://huggingface.co/${config.repo}/resolve/main`;
+	const files = [
+		{ url: `${baseUrl}/${config.prefix}-encoder.int8.onnx`, name: `${config.prefix}-encoder.int8.onnx` },
+		{ url: `${baseUrl}/${config.prefix}-decoder.int8.onnx`, name: `${config.prefix}-decoder.int8.onnx` },
+		{ url: `${baseUrl}/${config.prefix}-tokens.txt`, name: `${config.prefix}-tokens.txt` },
+	];
+
+	for (const file of files) {
+		const dest = path.join(dir, file.name);
+		if (existsSync(dest) && statSync(dest).size > 100) {
+			console.log(chalk.gray(`  ${file.name} already exists, skipping.`));
+			continue;
+		}
+		console.log(chalk.bold(`\n  Downloading ${file.name}...`));
+		const ok = await downloadFile(file.url, dest);
+		if (!ok) {
+			console.log(chalk.red(`  Failed to download ${file.name}`));
+			return null;
+		}
+	}
+
+	console.log(chalk.green(`\n  ✓ Model "${config.id}" downloaded successfully.`));
+	return config;
+}
 
 let _voiceModeActive = false;
 interface SherpaStream {
@@ -40,17 +142,20 @@ export function setVoiceModeActive(active: boolean): void {
 	_voiceModeActive = active;
 }
 
-export function initRecognizer(): void {
+export function initRecognizer(modelConfig?: VoiceModelConfig): void {
 	if (sherpaRecognizer) return;
+	const config = modelConfig ?? getModelConfig();
+	const paths = getModelPaths(config);
+
 	sherpaModule = esmRequire('sherpa-onnx-node') as SherpaModule;
 	sherpaRecognizer = new sherpaModule!.OfflineRecognizer({
 		featConfig: { sampleRate: 16000, featureDim: 80 },
 		modelConfig: {
 			whisper: {
-				encoder: path.join(SHERPA_MODEL_DIR, 'tiny.en-encoder.int8.onnx'),
-				decoder: path.join(SHERPA_MODEL_DIR, 'tiny.en-decoder.int8.onnx'),
+				encoder: paths.encoder,
+				decoder: paths.decoder,
 			},
-			tokens: path.join(SHERPA_MODEL_DIR, 'tiny.en-tokens.txt'),
+			tokens: paths.tokens,
 			numThreads: 2,
 			provider: 'cpu',
 		},
@@ -62,10 +167,6 @@ export function checkVoiceDependencies(): string | null {
 		esmRequire.resolve('sherpa-onnx-node');
 	} catch {
 		return 'sherpa-onnx-node (npm install sherpa-onnx-node)';
-	}
-	const encoder = path.join(SHERPA_MODEL_DIR, 'tiny.en-encoder.int8.onnx');
-	if (!existsSync(encoder)) {
-		return `whisper model files in ${SHERPA_MODEL_DIR}`;
 	}
 	try {
 		execFileSync('which', ['rec'], { stdio: 'pipe' });
@@ -106,7 +207,7 @@ export function killTts(): void {
 }
 
 export function getSherpaModelDir(): string {
-	return SHERPA_MODEL_DIR;
+	return getModelDir(getModelConfig());
 }
 
 export function getSherpaModule(): SherpaModule | null {

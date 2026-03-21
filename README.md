@@ -169,19 +169,18 @@ See [Environment Variables](#environment-variables) for the complete reference.
 brew install sox
 ```
 
-2. Download the Whisper speech-to-text model (~98 MB):
+2. The Whisper model is **auto-downloaded** on first use. The default model is `large-v3` (~1.7 GB) for best accuracy. To use a smaller/faster model, set `FORGEPILOT_VOICE_MODEL`:
 
 ```bash
-mkdir -p ~/.forgepilot/sherpa-models/whisper-tiny.en
-cd ~/.forgepilot/sherpa-models/whisper-tiny.en
-curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx
-curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx
-curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt
+export FORGEPILOT_VOICE_MODEL="large-v3"    # best accuracy (default, ~1.7 GB)
+# export FORGEPILOT_VOICE_MODEL="medium.en"  # good balance (~945 MB)
+# export FORGEPILOT_VOICE_MODEL="small.en"   # faster (~200 MB)
+# export FORGEPILOT_VOICE_MODEL="tiny.en"    # fastest, lowest accuracy (~98 MB)
 ```
 
 3. Ensure at least one AI agent CLI is installed (from Step 4) — voice mode uses `copilot` or `cursor` for AI-powered command parsing. Set `FORGEPILOT_PREFLIGHT_AGENT=cursor` if you prefer Cursor over Copilot.
 
-Speech recognition runs entirely offline via `sherpa-onnx-node` — no API keys needed. See [Voice Mode](#voice-mode) for full usage details.
+Speech recognition runs entirely offline via `sherpa-onnx-node` — no API keys needed. Models are stored in `~/.forgepilot/sherpa-models/`. See [Voice Mode](#voice-mode) for full usage details.
 
 ### Step 7 — Set Up MCP Server (Optional)
 
@@ -247,7 +246,12 @@ export FORGEPILOT_FIGMA_PAT="figd_..."
 
 # Voice (optional)
 export FORGEPILOT_VOICE_TTS="say"
+export FORGEPILOT_VOICE_MODEL="large-v3"         # tiny.en | small.en | medium.en | large-v3
 export FORGEPILOT_PREFLIGHT_AGENT="copilot"
+
+# Local Ollama (optional)
+export FORGEPILOT_OLLAMA_MODEL="qwen2.5-coder:7b" # model to use with ollama-local agent
+export FORGEPILOT_OLLAMA_API_BASE="http://127.0.0.1:11434"  # Ollama API endpoint
 
 # Slack (optional)
 export FORGEPILOT_SLACK_QA="true"
@@ -436,6 +440,17 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 | `FORGEPILOT_SLACK_POLL_INTERVAL_MS` | How often to poll for Slack replies (ms) | `5000` |
 | `FORGEPILOT_SLACK_ANSWER_TIMEOUT_MS` | Timeout waiting for Slack replies (ms) | `600000` (10 min) |
 
+### Local Ollama
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FORGEPILOT_OLLAMA_MODEL` | Ollama model to use with the `ollama-local` agent | *(interactive picker)* |
+| `FORGEPILOT_OLLAMA_API_BASE` | Ollama API endpoint | `http://127.0.0.1:11434` |
+
+The `ollama-local` agent uses [aider](https://aider.chat/) to drive a locally-running Ollama model. ForgePilot auto-detects both CLIs, starts `ollama serve` if needed, and provides a TUI model picker. No cloud API keys required.
+
+**Prerequisites:** `brew install ollama` and `pip install aider-chat` (or `pipx install aider-chat`).
+
 ### Slack-Driven Workflow
 
 When `FORGEPILOT_SLACK_QA=true` with `FORGEPILOT_SLACK_BOT_TOKEN` and `FORGEPILOT_SLACK_CHANNEL_ID` set, ForgePilot replaces the terminal TUI with a fully Slack-driven workflow:
@@ -573,6 +588,7 @@ If the AI CLI is unavailable or times out (30s), ForgePilot falls back to keywor
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FORGEPILOT_VOICE_TTS` | TTS command for spoken feedback | `say` (macOS) |
+| `FORGEPILOT_VOICE_MODEL` | Whisper model size: `tiny.en`, `small.en`, `medium.en`, `large-v3` | `large-v3` |
 | `FORGEPILOT_DEFAULT_AGENT` | Skip agent picker when starting ticket work | *(voice prompt)* |
 | `FORGEPILOT_PREFLIGHT_AGENT` | AI CLI used for voice command parsing (`copilot` or `cursor`) | `copilot` |
 | `FORGEPILOT_JIRA_PROJECT_KEY` | Jira project key for creating tickets from custom tasks (e.g. `CE`) | *(skips ticket creation)* |
@@ -652,6 +668,7 @@ ForgePilot auto-detects which CLI tools are installed on your system:
 | `opencode-autonomous` | `opencode` | OpenCode with prompt flag |
 | `cline-autonomous` | `cline` | Cline with --yolo auto-approval |
 | `rovo-autonomous` | `acli` | Atlassian Rovo in yolo mode |
+| `ollama-local` | `aider` + `ollama` | Local Ollama model via aider — no cloud API needed |
 
 ## What ForgePilot Does
 

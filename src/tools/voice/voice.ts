@@ -19,11 +19,11 @@ import { getCached } from '../../core/cache.js';
 import { resolveRepoPathsAuto, scanLocalRepos } from '../../core/repo.js';
 import {
 	checkVoiceDependencies,
+	ensureVoiceModel,
 	initRecognizer,
 	speak,
 	printAndSpeak,
 	killTts,
-	getSherpaModelDir,
 	getSherpaModule,
 	getSherpaRecognizer,
 	setVoiceModeActive,
@@ -1104,22 +1104,21 @@ async function loadLastContext(state: VoiceState): Promise<void> {
 export async function startVoiceMode(): Promise<void> {
 	const missing = checkVoiceDependencies();
 	if (missing) {
-		const modelDir = getSherpaModelDir();
 		console.error(chalk.red(`\n  "${missing}" is required for voice mode but was not found.`));
 		console.error(chalk.yellow('  Install:'));
 		console.error(chalk.white('    npm install sherpa-onnx-node'));
 		console.error(chalk.white('    brew install sox'));
-		console.error(chalk.yellow('  Download the Whisper model:'));
-		console.error(chalk.white(`    mkdir -p ${modelDir}`));
-		console.error(chalk.white(`    cd ${modelDir}`));
-		console.error(chalk.white('    curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-encoder.int8.onnx'));
-		console.error(chalk.white('    curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-decoder.int8.onnx'));
-		console.error(chalk.white('    curl -LO https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny.en/resolve/main/tiny.en-tokens.txt'));
 		process.exit(1);
 	}
 
-	console.log(chalk.gray('  Loading speech recognition model...'));
-	initRecognizer();
+	const modelConfig = await ensureVoiceModel();
+	if (!modelConfig) {
+		console.error(chalk.red('  Voice model not available. Cannot start voice mode.'));
+		return;
+	}
+
+	console.log(chalk.gray(`  Loading speech recognition model (${modelConfig.id})...`));
+	initRecognizer(modelConfig);
 	setVoiceModeActive(true);
 
 	const state: VoiceState = {
