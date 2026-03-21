@@ -91,6 +91,12 @@ function findMatchingRepo(normalizedUrl: string, remoteIndex: Map<string, string
 
 export const AI_DECIDES_SENTINEL = '__ai_decides__';
 
+function formatPickerItem(item: string): string {
+	if (item === AI_DECIDES_SENTINEL) return '✨ Let AI figure it out (select all repos)';
+	if (item === MANUAL_URL_SENTINEL) return '🔗 Enter a repo URL or local path';
+	return item;
+}
+
 export function pickReposInteractive(
 	repos: string[],
 	title: string,
@@ -108,7 +114,7 @@ export function pickReposInteractive(
 		if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
 		const render = () => renderRepoPicker(
-			displayItems.map((item) => item === AI_DECIDES_SENTINEL ? '✨ Let AI figure it out (select all repos)' : item),
+			displayItems.map(formatPickerItem),
 			cursorIndex,
 			selectedIndices,
 			title,
@@ -154,7 +160,7 @@ export function pickReposInteractive(
 			if (key.name === 'return' || key.name === 'enter') {
 				if (process.stdin.isTTY) process.stdin.setRawMode(false);
 				process.stdin.removeListener('keypress', onKeypress);
-				const picked = [...selectedIndices].sort().filter((i) => i < repos.length).map((i) => repos[i]);
+				const picked = [...selectedIndices].sort().map((i) => displayItems[i]);
 				resolve(picked);
 			}
 		};
@@ -195,11 +201,68 @@ async function pickReposVoice(repos: string[], ticketKey: string): Promise<strin
 	return selected;
 }
 
-export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise<Map<string, string>> {
-	const description = getDescriptionText(detail);
-	const ticketRepos = extractRepoLabels(description);
-	const repoMap = new Map<string, string>();
+async function pickReposVoiceWithUrl(repos: string[], ticketKey: string): Promise<string[]> {
+	const selected = await pickReposVoice(repos, ticketKey);
+	if (selected.length) return selected;
 
+	const wantUrl = await askUserChoice('No repos selected. Would you like to enter a repo URL instead?', [
+		{ id: 'yes', label: 'Yes — enter a URL or path' },
+		{ id: 'no', label: 'No — cancel' },
+	]);
+	if (wantUrl === 'yes') return [MANUAL_URL_SENTINEL];
+	return [];
+}
+
+export const MANUAL_URL_SENTINEL = '__enter_url__';
+
+async function resolveManualUrl(
+	url: string,
+	localRepoPaths: string[],
+	remoteIndex?: Map<string, string>,
+): Promise<string | null> {
+	const normalized = normalizeRepoUrl(url);
+	if (!normalized) return null;
+
+	const idx = remoteIndex ?? new Map<string, string>();
+	if (!remoteIndex) {
+		for (const localPath of localRepoPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!idx.has(remote)) idx.set(remote, localPath);
+			}
+		}
+	}
+
+	const match = findMatchingRepo(normalized, idx);
+	if (match) return match;
+
+	const asPath = path.resolve(url.replace(/^~/, process.env.HOME ?? '~'));
+	if (existsSync(path.join(asPath, '.git'))) return asPath;
+
+	return null;
+}
+
+export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise<Map<string, string>> {
+	const repoMap = new Map<string, string>();
+	const cacheKey = `repoChoice_${detail.key}`;
+
+	// --- Step 1: Check cache first ---
+	const cached = await getCached<string[]>(cacheKey);
+	if (cached?.length) {
+		const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
+		if (allValid) {
+			console.log(chalk.gray(`Using cached repo selection for ${detail.key}:`));
+			for (const p of cached) {
+				const name = path.basename(p);
+				repoMap.set(name, p);
+				console.log(chalk.green(`  ✓ ${name} → ${p}`));
+			}
+			return repoMap;
+		}
+		console.log(chalk.gray(`  Cached repo paths for ${detail.key} are no longer valid. Re-resolving...`));
+	}
+
+	// --- Step 2: Ensure root directory ---
 	let rootDir = await getCached<string>('rootDir');
 	if (!rootDir) {
 		const input = await askUser('Root directory containing your repos (e.g. ~/dev): ');
@@ -215,124 +278,127 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 	const localRepoPaths = await scanLocalRepos(rootDir);
 	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
 
-	if (!ticketRepos.length) {
-		const cacheKey = `repoChoice_${detail.key}`;
-		const cached = await getCached<string[]>(cacheKey);
-		if (cached?.length) {
-			const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
-			if (allValid) {
-				console.log(chalk.gray(`Using cached repo selection for ${detail.key}:`));
-				for (const p of cached) {
-					const name = path.basename(p);
-					repoMap.set(name, p);
-					console.log(chalk.green(`  ✓ ${name} → ${p}`));
-				}
-				return repoMap;
+	// --- Step 3: Try matching repo URLs from ticket description ---
+	const description = getDescriptionText(detail);
+	const ticketRepos = extractRepoLabels(description);
+
+	if (ticketRepos.length) {
+		console.log(chalk.bold(`\nFound ${ticketRepos.length} repo URL(s) in ticket description:`));
+		for (const repo of ticketRepos) {
+			console.log(chalk.cyan(`  ${repo.label} (${repo.normalizedUrl})`));
+		}
+
+		const remoteIndex = new Map<string, string>();
+		for (const localPath of localRepoPaths) {
+			const remotes = await getRemoteUrls(localPath);
+			for (const remote of remotes) {
+				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
 			}
 		}
 
-		if (!localRepoPaths.length) {
-			const manualPath = await askUser('No repos found. Enter the local repo path to work in: ');
-			if (!manualPath) throw new Error('No repo path provided.');
-			const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
-			if (!existsSync(path.join(resolved, '.git'))) throw new Error(`Not a git repository: ${resolved}`);
-			repoMap.set('manual', resolved);
-			await setCached(cacheKey, [resolved]);
+		const missing: string[] = [];
+		for (const repo of ticketRepos) {
+			const localPath = findMatchingRepo(repo.normalizedUrl, remoteIndex);
+			if (localPath) {
+				repoMap.set(repo.normalizedUrl, localPath);
+				console.log(chalk.green(`  ✓ ${repo.label} → ${localPath}`));
+			} else {
+				missing.push(repo.label);
+				console.log(chalk.yellow(`  ✗ ${repo.label} (${repo.normalizedUrl}) — not found locally`));
+			}
+		}
+
+		if (!missing.length) {
+			await setCached(cacheKey, [...repoMap.values()]);
 			return repoMap;
 		}
 
-		const picked = isVoiceModeActive()
-			? await pickReposVoice(localRepoPaths, detail.key)
-			: await pickReposInteractive(localRepoPaths, `Select repo(s) for ${detail.key}`);
-		if (!picked.length) throw new Error('No repos selected.');
+		if (repoMap.size > 0) {
+			console.log(chalk.yellow(`\n  ${missing.length} repo(s) not found locally. Continuing with matched repos.`));
+		} else {
+			console.log(chalk.yellow('\n  None of the ticket repos were found locally.'));
+		}
+	}
 
-		await setCached(cacheKey, picked);
-		for (const p of picked) {
-			const name = path.basename(p);
-			repoMap.set(name, p);
-			console.log(chalk.green(`  ✓ ${name} → ${p}`));
+	// --- Step 4: If still no repos, ask user to pick or provide a URL ---
+	if (!repoMap.size) {
+		if (!localRepoPaths.length) {
+			const manualPath = await askUser('No repos found. Enter a local repo path or repo URL: ');
+			if (!manualPath) throw new Error('No repo path provided.');
+			const resolved = await resolveManualUrl(manualPath, localRepoPaths);
+			if (resolved) {
+				repoMap.set(path.basename(resolved), resolved);
+				await setCached(cacheKey, [resolved]);
+				console.log(chalk.green(`  ✓ ${path.basename(resolved)} → ${resolved}`));
+				return repoMap;
+			}
+			const asPath = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
+			if (!existsSync(path.join(asPath, '.git'))) throw new Error(`Not a git repository: ${asPath}`);
+			repoMap.set('manual', asPath);
+			await setCached(cacheKey, [asPath]);
+			return repoMap;
+		}
+
+		const reposWithUrlOption = [...localRepoPaths, MANUAL_URL_SENTINEL];
+		const picked = isVoiceModeActive()
+			? await pickReposVoiceWithUrl(localRepoPaths, detail.key)
+			: await pickReposInteractive(reposWithUrlOption, `Select repo(s) for ${detail.key}`);
+
+		const manualUrlPicks = picked.filter((p) => p === MANUAL_URL_SENTINEL);
+		const repoPicks = picked.filter((p) => p !== MANUAL_URL_SENTINEL);
+
+		if (manualUrlPicks.length) {
+			const url = await askUser(chalk.cyan('Enter a repo URL or local path: '));
+			if (url) {
+				const resolved = await resolveManualUrl(url, localRepoPaths);
+				if (resolved) {
+					repoPicks.push(resolved);
+					console.log(chalk.green(`  ✓ Resolved: ${path.basename(resolved)} → ${resolved}`));
+				} else {
+					console.log(chalk.yellow(`  Could not resolve "${url}" to a local repo.`));
+				}
+			}
+		}
+
+		if (!repoPicks.length) throw new Error('No repos selected.');
+
+		await setCached(cacheKey, repoPicks);
+		for (const p of repoPicks) {
+			repoMap.set(path.basename(p), p);
+			console.log(chalk.green(`  ✓ ${path.basename(p)} → ${p}`));
 		}
 		return repoMap;
 	}
 
-	console.log(chalk.bold(`\nFound ${ticketRepos.length} repo URL(s) in ticket description:`));
-	for (const repo of ticketRepos) {
-		console.log(chalk.cyan(`  ${repo.label} (${repo.normalizedUrl})`));
-	}
+	// --- Step 5: Some matched via URL, but some missing — offer picker for the rest ---
+	const alreadyMatched = new Set(repoMap.values());
+	const unmatched = localRepoPaths.filter((p) => !alreadyMatched.has(p));
 
-	const remoteIndex = new Map<string, string>();
-	for (const localPath of localRepoPaths) {
-		const remotes = await getRemoteUrls(localPath);
-		for (const remote of remotes) {
-			if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
-		}
-	}
+	if (unmatched.length) {
+		console.log(chalk.gray('  Select additional local repos, or enter a URL.\n'));
 
-	const missing: string[] = [];
-	for (const repo of ticketRepos) {
-		const localPath = findMatchingRepo(repo.normalizedUrl, remoteIndex);
-		if (localPath) {
-			repoMap.set(repo.normalizedUrl, localPath);
-			console.log(chalk.green(`  ✓ ${repo.label} → ${localPath}`));
-		} else {
-			missing.push(repo.label);
-			console.log(chalk.yellow(`  ✗ ${repo.label} (${repo.normalizedUrl}) — not found locally`));
-		}
-	}
+		const unmatchedWithUrl = [...unmatched, MANUAL_URL_SENTINEL];
+		const picked = isVoiceModeActive()
+			? await pickReposVoiceWithUrl(unmatched, detail.key)
+			: await pickReposInteractive(unmatchedWithUrl, `Select additional repo(s) for ${detail.key}`);
 
-	if (missing.length && repoMap.size > 0) {
-		console.log(chalk.yellow(`\n  ${missing.length} repo(s) not found locally. Continuing with matched repos.`));
-		console.log(chalk.gray('  You can also select additional local repos below.\n'));
-	}
+		const manualUrlPicks = picked.filter((p) => p === MANUAL_URL_SENTINEL);
+		const repoPicks = picked.filter((p) => p !== MANUAL_URL_SENTINEL);
 
-	if (missing.length && repoMap.size === 0) {
-		console.log(chalk.yellow('\n  None of the ticket repos were found locally.'));
-		console.log(chalk.gray('  Please select the correct local repo(s) below.\n'));
-	}
-
-	if (missing.length) {
-		const cacheKey = `repoChoice_${detail.key}`;
-		const cached = await getCached<string[]>(cacheKey);
-		if (cached?.length) {
-			const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
-			if (allValid) {
-				console.log(chalk.gray(`Using cached repo selection for missing repos:`));
-				for (const p of cached) {
-					const name = path.basename(p);
-					if (![...repoMap.values()].includes(p)) {
-						repoMap.set(name, p);
-						console.log(chalk.green(`  ✓ ${name} → ${p}`));
-					}
+		if (manualUrlPicks.length) {
+			const url = await askUser(chalk.cyan('Enter a repo URL or local path: '));
+			if (url) {
+				const resolved = await resolveManualUrl(url, localRepoPaths);
+				if (resolved && !alreadyMatched.has(resolved)) {
+					repoPicks.push(resolved);
+					console.log(chalk.green(`  ✓ Resolved: ${path.basename(resolved)} → ${resolved}`));
 				}
-				return repoMap;
 			}
 		}
 
-		if (localRepoPaths.length) {
-			const alreadyMatched = new Set(repoMap.values());
-			const unmatched = localRepoPaths.filter((p) => !alreadyMatched.has(p));
-			if (unmatched.length) {
-				const picked = isVoiceModeActive()
-					? await pickReposVoice(unmatched, detail.key)
-					: await pickReposInteractive(unmatched, `Select repo(s) for ${detail.key}`);
-				if (picked.length) {
-					await setCached(cacheKey, picked);
-					for (const p of picked) {
-						const name = path.basename(p);
-						repoMap.set(name, p);
-						console.log(chalk.green(`  ✓ ${name} → ${p}`));
-					}
-				}
-			}
-		} else {
-			const manualPath = await askUser('No local repos found. Enter the repo path manually: ');
-			if (manualPath) {
-				const resolved = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
-				if (existsSync(path.join(resolved, '.git'))) {
-					repoMap.set('manual', resolved);
-					await setCached(`repoChoice_${detail.key}`, [resolved]);
-				}
-			}
+		for (const p of repoPicks) {
+			repoMap.set(path.basename(p), p);
+			console.log(chalk.green(`  ✓ ${path.basename(p)} → ${p}`));
 		}
 	}
 
@@ -340,6 +406,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		throw new Error('No repositories resolved. Cannot proceed.');
 	}
 
+	await setCached(cacheKey, [...repoMap.values()]);
 	return repoMap;
 }
 
