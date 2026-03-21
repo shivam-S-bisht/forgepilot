@@ -186,7 +186,13 @@ export function speak(text: string): void {
 		if (activeTtsProcess) {
 			try { activeTtsProcess.kill(); } catch { /* */ }
 		}
-		const sanitized = text.replace(/["`$]/g, '').slice(0, 200);
+		const sanitized = text
+			.replace(/["`$]/g, '')
+			.replace(/\n+/g, '. ')
+			.replace(/\s{2,}/g, ' ')
+			.trim()
+			.slice(0, 500);
+		if (!sanitized) return;
 		activeTtsProcess = spawn(tts, [sanitized], { stdio: 'ignore' });
 		activeTtsProcess.on('close', () => { activeTtsProcess = null; });
 	} catch {
@@ -197,6 +203,43 @@ export function speak(text: string): void {
 export function printAndSpeak(text: string): void {
 	console.log(chalk.cyan(`  🔊 ${text}`));
 	speak(text);
+}
+
+export function speakLong(text: string): void {
+	const tts = getTtsCommand();
+	const sanitized = text.replace(/["`$]/g, '').replace(/\n+/g, '. ').replace(/\s{2,}/g, ' ').trim();
+	if (!sanitized) return;
+
+	const sentences = sanitized.match(/[^.!?]+[.!?]*/g) ?? [sanitized];
+	const chunks: string[] = [];
+	let current = '';
+
+	for (const sentence of sentences) {
+		if (current.length + sentence.length > 450) {
+			if (current) chunks.push(current.trim());
+			current = sentence;
+		} else {
+			current += sentence;
+		}
+	}
+	if (current.trim()) chunks.push(current.trim());
+
+	if (activeTtsProcess) {
+		try { activeTtsProcess.kill(); } catch { /* */ }
+	}
+
+	let idx = 0;
+	const speakNext = () => {
+		if (idx >= chunks.length) { activeTtsProcess = null; return; }
+		try {
+			activeTtsProcess = spawn(tts, [chunks[idx]], { stdio: 'ignore' });
+			idx++;
+			activeTtsProcess.on('close', speakNext);
+		} catch {
+			activeTtsProcess = null;
+		}
+	};
+	speakNext();
 }
 
 export function killTts(): void {
@@ -376,6 +419,31 @@ function parseSpokenNumber(text: string): number | null {
 
 export type VoiceOption = { id: string; label: string };
 
+function askLineInternal(prompt: string, prefill = ''): Promise<string> {
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	if (prefill) rl.write(prefill);
+	return new Promise((resolve) =>
+		rl.question(prompt, (answer) => {
+			rl.close();
+			if (process.stdin.readable) process.stdin.resume();
+			resolve(answer.trim());
+		}),
+	);
+}
+
+function matchVoiceToOption(text: string, options: VoiceOption[]): string | null {
+	const num = parseSpokenNumber(text);
+	if (num && num >= 1 && num <= options.length) return options[num - 1].id;
+
+	const lower = text.toLowerCase();
+	for (const opt of options) {
+		const labelWords = opt.label.toLowerCase().split(/\s+/);
+		const matchCount = labelWords.filter((w) => w.length > 3 && lower.includes(w)).length;
+		if (matchCount >= 2 || lower.includes(opt.id.toLowerCase())) return opt.id;
+	}
+	return null;
+}
+
 export async function askVoice(question: string, options?: VoiceOption[]): Promise<string> {
 	printAndSpeak(question);
 
@@ -385,34 +453,39 @@ export async function askVoice(question: string, options?: VoiceOption[]): Promi
 			console.log(chalk.cyan(`  ${i + 1}. ${options[i].label}`));
 		}
 		console.log('');
-		speak(`Choose a number from 1 to ${options.length}.`);
 	}
 
-	console.log(chalk.gray('  Press [Space] to record your answer...'));
-	const startKey = await waitForKeyInternal(['space']);
-	if (startKey === 'quit') return '';
+	if (process.stdin.isTTY) process.stdin.setRawMode(true);
+	console.log(chalk.gray('  [Space] to speak, or start typing...'));
+	const input = await waitForInputMode();
+	if (process.stdin.isTTY) process.stdin.setRawMode(false);
+
+	if (input.mode === 'quit') return '';
+
+	if (input.mode === 'keyboard') {
+		if (options?.length) {
+			const answer = await askLineInternal(chalk.cyan(`  Choose (1-${options.length}): `), input.firstChar);
+			const num = parseInt(answer, 10);
+			if (num >= 1 && num <= options.length) {
+				const chosen = options[num - 1];
+				console.log(chalk.green(`  → Selected: ${chosen.label}`));
+				return chosen.id;
+			}
+			return answer || '';
+		}
+		return askLineInternal(chalk.cyan('  Answer: '), input.firstChar);
+	}
 
 	const transcript = await recordAndTranscribe();
 	if (!transcript) return '';
 
 	if (options?.length) {
-		const num = parseSpokenNumber(transcript);
-		if (num && num >= 1 && num <= options.length) {
-			const chosen = options[num - 1];
-			console.log(chalk.green(`  → Selected: ${chosen.label}`));
-			return chosen.id;
+		const matched = matchVoiceToOption(transcript, options);
+		if (matched) {
+			const opt = options.find((o) => o.id === matched);
+			if (opt) console.log(chalk.green(`  → Selected: ${opt.label}`));
+			return matched;
 		}
-
-		const lower = transcript.toLowerCase();
-		for (const opt of options) {
-			const labelWords = opt.label.toLowerCase().split(/\s+/);
-			const matchCount = labelWords.filter((w) => w.length > 3 && lower.includes(w)).length;
-			if (matchCount >= 2 || lower.includes(opt.id.toLowerCase())) {
-				console.log(chalk.green(`  → Selected: ${opt.label}`));
-				return opt.id;
-			}
-		}
-
 		printAndSpeak(`I didn't match that to an option. Using your answer as-is.`);
 	}
 

@@ -439,9 +439,52 @@ async function handleStartTicket(params: Record<string, string>, state: VoiceSta
 	const detail = await fetchIssueDetail(key);
 
 	let repoMap = await resolveRepoPathsAuto(detail);
+
 	if (!repoMap.size && state.lastRepoPath) {
-		repoMap = new Map([['current', state.lastRepoPath]]);
+		const isGitRepo = existsSync(path.join(state.lastRepoPath, '.git'));
+		if (isGitRepo) {
+			repoMap = new Map([['current', state.lastRepoPath]]);
+		} else {
+			const nestedRepos = await scanLocalRepos(state.lastRepoPath);
+			if (nestedRepos.length) {
+				printAndSpeak(`No exact repo match. Found ${nestedRepos.length} repos in your root. Pick one.`);
+				const repoOptions = buildDisambiguatedRepoOptions(nestedRepos, state.lastRepoPath);
+				const chosen = await askVoice('Select a repo:', repoOptions);
+				if (chosen && repoOptions.some((r) => r.id === chosen)) {
+					repoMap = new Map([[path.basename(chosen), chosen]]);
+				} else {
+					const fuzzy = fuzzyMatchRepo(chosen, repoOptions);
+					if (fuzzy) {
+						printAndSpeak(`Using "${fuzzy.label}".`);
+						repoMap = new Map([[path.basename(fuzzy.id), fuzzy.id]]);
+					}
+				}
+			}
+		}
 	}
+
+	if (!repoMap.size) {
+		const rootDir = await getCached<string>('rootDir') ?? process.env.FORGEPILOT_ROOT_DIR?.trim();
+		if (rootDir) {
+			const resolvedRoot = rootDir.replace(/^~/, process.env.HOME ?? '~');
+			const localRepos = await scanLocalRepos(resolvedRoot);
+			if (localRepos.length) {
+				printAndSpeak(`No repo found for ${key}. Pick from your repos.`);
+				const repoOptions = buildDisambiguatedRepoOptions(localRepos, resolvedRoot);
+				const chosen = await askVoice('Select a repo:', repoOptions);
+				if (chosen && repoOptions.some((r) => r.id === chosen)) {
+					repoMap = new Map([[path.basename(chosen), chosen]]);
+				} else {
+					const fuzzy = fuzzyMatchRepo(chosen, repoOptions);
+					if (fuzzy) {
+						printAndSpeak(`Using "${fuzzy.label}".`);
+						repoMap = new Map([[path.basename(fuzzy.id), fuzzy.id]]);
+					}
+				}
+			}
+		}
+	}
+
 	if (!repoMap.size) {
 		printAndSpeak('No repositories found. Set a root directory via CLI first.');
 		return;
@@ -742,6 +785,51 @@ function handleShowMore(_params: Record<string, string>, state: VoiceState): voi
 	displayTicketPage(state);
 }
 
+function buildDisambiguatedRepoOptions(repos: string[], rootDir: string): VoiceOption[] {
+	const basenames = new Map<string, number>();
+	for (const r of repos) {
+		const base = path.basename(r);
+		basenames.set(base, (basenames.get(base) ?? 0) + 1);
+	}
+
+	return repos.map((r) => {
+		const base = path.basename(r);
+		const needsDisambiguation = (basenames.get(base) ?? 0) > 1;
+		const label = needsDisambiguation
+			? path.relative(rootDir, r)
+			: base;
+		return { id: r, label };
+	});
+}
+
+function fuzzyMatchRepo(input: string, options: VoiceOption[]): VoiceOption | null {
+	const lower = input.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+	const words = lower.split(/\s+/).filter((w) => w.length > 1);
+	if (!words.length) return null;
+
+	let bestMatch: VoiceOption | null = null;
+	let bestScore = 0;
+
+	for (const opt of options) {
+		if (opt.id === '__done__') continue;
+		const labelLower = opt.label.toLowerCase();
+		const pathLower = opt.id.toLowerCase();
+		let score = 0;
+
+		for (const word of words) {
+			if (labelLower.includes(word)) score += 2;
+			else if (pathLower.includes(word)) score += 1;
+		}
+
+		if (score > bestScore) {
+			bestScore = score;
+			bestMatch = opt;
+		}
+	}
+
+	return bestScore >= 2 ? bestMatch : null;
+}
+
 async function handleCustomTask(params: Record<string, string>, state: VoiceState): Promise<void> {
 	let description = params.description?.trim();
 
@@ -770,10 +858,7 @@ async function handleCustomTask(params: Record<string, string>, state: VoiceStat
 		return;
 	}
 
-	const repoOptions: VoiceOption[] = localRepos.map((r) => ({
-		id: r,
-		label: path.basename(r),
-	}));
+	const repoOptions: VoiceOption[] = buildDisambiguatedRepoOptions(localRepos, resolvedRoot);
 
 	const selectedRepos: string[] = [];
 	printAndSpeak('Which repository should I use? You can add more after.');
@@ -787,8 +872,22 @@ async function handleCustomTask(params: Record<string, string>, state: VoiceStat
 			[...remaining, { id: '__done__', label: 'done' }],
 		);
 		if (!chosen || chosen === '__done__') break;
+
+		const isValidRepo = repoOptions.some((r) => r.id === chosen);
+		if (!isValidRepo) {
+			const fuzzyMatch = fuzzyMatchRepo(chosen, repoOptions);
+			if (fuzzyMatch) {
+				printAndSpeak(`Did you mean "${fuzzyMatch.label}"? Using that.`);
+				selectedRepos.push(fuzzyMatch.id);
+			} else {
+				printAndSpeak(`Could not find a repo matching "${chosen}". Try again or say "done".`);
+			}
+			continue;
+		}
+
 		selectedRepos.push(chosen);
-		printAndSpeak(`Added ${path.basename(chosen)}.`);
+		const opt = repoOptions.find((r) => r.id === chosen);
+		printAndSpeak(`Added ${opt?.label ?? path.basename(chosen)}.`);
 	}
 
 	if (!selectedRepos.length) {
