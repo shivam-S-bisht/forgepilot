@@ -10,8 +10,16 @@ export function adfToText(node: any): string {
 	if (Array.isArray(node)) return node.map((item) => adfToText(item)).join('');
 
 	switch (node.type) {
-		case 'text':
-			return node.text ?? '';
+		case 'text': {
+			const text = node.text ?? '';
+			const linkMark = node.marks?.find((m: { type: string }) => m.type === 'link');
+			if (linkMark?.attrs?.href) {
+				const href = linkMark.attrs.href as string;
+				if (text === href || !text.trim()) return href;
+				return `${text} (${href})`;
+			}
+			return text;
+		}
 		case 'hardBreak':
 			return '\n';
 		case 'inlineCard':
@@ -37,9 +45,50 @@ export function adfToText(node: any): string {
 			return adfToText(node.content ?? []);
 		case 'doc':
 			return adfToText(node.content ?? []);
-		default:
-			return adfToText(node.content ?? []);
+		default: {
+			const attrs = node.attrs as Record<string, unknown> | undefined;
+			const fromAttrs =
+				(typeof attrs?.url === 'string' && attrs.url) ||
+				(typeof attrs?.href === 'string' && attrs.href) ||
+				'';
+			const body = adfToText(node.content ?? []);
+			if (fromAttrs && body.trim()) return `${fromAttrs} ${body}`;
+			if (fromAttrs) return fromAttrs;
+			return body;
+		}
 	}
+}
+
+const REPO_URL_IN_STRING = /(?:https?:\/\/[^\s"'<>)\]]+|git@[^\s"'<>)\]]+)/gi;
+
+export function collectHttpUrlsFromValue(value: unknown, into: Set<string>): void {
+	if (value == null) return;
+	if (typeof value === 'string') {
+		let m: RegExpExecArray | null;
+		const re = new RegExp(REPO_URL_IN_STRING.source, REPO_URL_IN_STRING.flags);
+		while ((m = re.exec(value)) !== null) {
+			into.add(m[0].replace(/[),.;]+$/, ''));
+		}
+		return;
+	}
+	if (Array.isArray(value)) {
+		for (const item of value) collectHttpUrlsFromValue(item, into);
+		return;
+	}
+	if (typeof value === 'object') {
+		for (const v of Object.values(value as Record<string, unknown>)) {
+			collectHttpUrlsFromValue(v, into);
+		}
+	}
+}
+
+/** Pulls repo-like URLs from the whole Jira issue (description, AC, custom fields, dev panel JSON, etc.). */
+export function collectRepoUrlsFromIssue(detail: { fields: Record<string, unknown> }): string[] {
+	const found = new Set<string>();
+	collectHttpUrlsFromValue(detail.fields, found);
+	const repoHosts =
+		/(gitlab\.com|github\.com|bitbucket\.org|dev\.azure\.com|visualstudio\.com|ssh\.dev\.azure\.com)/i;
+	return [...found].filter((u) => repoHosts.test(u) || u.startsWith('git@'));
 }
 
 function extractAcceptanceCriteria(description: string): string {

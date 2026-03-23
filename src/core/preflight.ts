@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
 import { commentsText, getAcceptanceCriteria, getDescriptionText, linkedIssuesText } from '../tools/jira/jira-text.js';
-import { extractRepoLabels, scanLocalRepos, getRemoteUrls } from './repo.js';
+import { extractTicketRepoLabels, scanLocalRepos, getRemoteUrls } from './repo.js';
 import { askConcernViaSlack, shouldUseSlackQa } from '../tools/slack/slack.js';
 import type { JiraIssueDetail } from './types.js';
 import { askUser } from './ask.js';
@@ -95,7 +95,7 @@ function toTicketContext(detail: JiraIssueDetail): {
 	const ac = getAcceptanceCriteria(detail);
 	const comments = commentsText(detail);
 	const links = linkedIssuesText(detail);
-	const repoUrls = extractRepoLabels(description).map((x) => x.normalizedUrl);
+	const repoUrls = extractTicketRepoLabels(detail).map((x) => x.normalizedUrl);
 	return { title, status, description, ac, comments, links, repoUrls };
 }
 
@@ -392,6 +392,7 @@ export async function runPreflightChecks(
 	const historyForPrompt = formatHistoryForPrompt(priorHistory);
 	const priorAnswerIndex = buildPriorAnswerIndex(priorHistory);
 	const { status: localRepoStatusText, localPaths: referenceRepoPaths } = await resolveLocalRepoStatus(detail);
+	console.log(chalk.gray('  Running AI preflight review (may take 30–60s)...'));
 	const aiConcerns = await analyzeTicketWithAi(detail, hasContributing, historyForPrompt, localRepoStatusText);
 	const concerns = aiConcerns ?? [];
 	const answers = new Map<string, string>();

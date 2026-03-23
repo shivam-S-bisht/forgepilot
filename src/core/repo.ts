@@ -6,7 +6,11 @@ import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getCached, setCached } from './cache.js';
-import { getDescriptionText } from '../tools/jira/jira-text.js';
+import {
+	getDescriptionText,
+	getAcceptanceCriteria,
+	collectRepoUrlsFromIssue,
+} from '../tools/jira/jira-text.js';
 import { postAndWaitForSelection } from '../tools/slack/slack.js';
 import type { SlackPickOption } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, RepoLabel, TicketRepoResolution } from './types.js';
@@ -46,6 +50,24 @@ export function extractRepoLabels(text: string): RepoLabel[] {
 		}
 	}
 	return results;
+}
+
+/** Repo URLs from description/AC text plus any GitHub/GitLab/etc. URLs anywhere in Jira `fields` (smart links, dev panel, custom fields). */
+export function extractTicketRepoLabels(detail: JiraIssueDetail): RepoLabel[] {
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+	const fullText = [description, ac].filter((t) => t && t !== 'Not available').join('\n');
+	const fromText = extractRepoLabels(fullText);
+	const fromFields = collectRepoUrlsFromIssue(detail);
+	const byNorm = new Map<string, RepoLabel>();
+	for (const r of fromText) byNorm.set(r.normalizedUrl, r);
+	for (const raw of fromFields) {
+		const normalized = normalizeRepoUrl(raw);
+		if (!normalized || byNorm.has(normalized)) continue;
+		const slug = normalized.split('/').pop() ?? normalized;
+		byNorm.set(normalized, { label: slug, normalizedUrl: normalized });
+	}
+	return [...byNorm.values()];
 }
 
 export async function scanLocalRepos(rootDir: string, depth = 0): Promise<string[]> {
@@ -160,7 +182,12 @@ export function pickReposInteractive(
 			if (key.name === 'return' || key.name === 'enter') {
 				if (process.stdin.isTTY) process.stdin.setRawMode(false);
 				process.stdin.removeListener('keypress', onKeypress);
-				const picked = [...selectedIndices].sort().map((i) => displayItems[i]);
+				let indices = [...selectedIndices].sort((a, b) => a - b);
+				if (indices.length === 0 && displayItems.length > 0) {
+					indices = [cursorIndex];
+				}
+				const picked = indices.map((i) => displayItems[i]);
+				if (process.stdin.readable) process.stdin.resume();
 				resolve(picked);
 			}
 		};
@@ -242,6 +269,62 @@ async function resolveManualUrl(
 	return null;
 }
 
+function extractJsonPayload(text: string): string {
+	const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+	if (fenced) return fenced[1].trim();
+	const braces = text.match(/\{[\s\S]*\}/);
+	if (braces) return braces[0];
+	return text.trim();
+}
+
+async function detectRepoWithAi(
+	detail: JiraIssueDetail,
+	localRepoPaths: string[],
+): Promise<string[]> {
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+	const fullText = [description, ac].filter((t) => t && t !== 'Not available').join('\n');
+	const repoList = localRepoPaths.map((p) => path.basename(p)).join(', ');
+
+	const prompt = [
+		'Analyze this Jira ticket and determine which local repository the work should be done in.',
+		'Return ONLY valid JSON: {"repos":["repo-name"]} with the most likely repo name(s) from the list below.',
+		'If you cannot determine the repo, return {"repos":[]}.',
+		'',
+		`Ticket: ${detail.key} — ${detail.fields.summary ?? ''}`,
+		`Description: ${fullText.slice(0, 3000)}`,
+		'',
+		`Available local repos: ${repoList}`,
+	].join('\n');
+
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 15_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '--prompt', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 15_000 }));
+		} else {
+			return [];
+		}
+
+		const json = extractJsonPayload(stdout);
+		const parsed = JSON.parse(json) as { repos?: string[] };
+		if (!parsed.repos?.length) return [];
+
+		const matched: string[] = [];
+		for (const name of parsed.repos) {
+			const lower = name.toLowerCase();
+			const found = localRepoPaths.find((p) => path.basename(p).toLowerCase() === lower);
+			if (found) matched.push(found);
+		}
+		return matched;
+	} catch {
+		return [];
+	}
+}
+
 export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise<Map<string, string>> {
 	const repoMap = new Map<string, string>();
 	const cacheKey = `repoChoice_${detail.key}`;
@@ -278,9 +361,8 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 	const localRepoPaths = await scanLocalRepos(rootDir);
 	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
 
-	// --- Step 3: Try matching repo URLs from ticket description ---
-	const description = getDescriptionText(detail);
-	const ticketRepos = extractRepoLabels(description);
+	// --- Step 3: Try matching repo URLs (description, AC, Jira smart links / dev fields) ---
+	const ticketRepos = extractTicketRepoLabels(detail);
 
 	if (ticketRepos.length) {
 		console.log(chalk.bold(`\nFound ${ticketRepos.length} repo URL(s) in ticket description:`));
@@ -320,10 +402,33 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		}
 	}
 
-	// --- Step 4: If still no repos, ask user to pick or provide a URL ---
+	// --- Step 4: AI-based repo detection ---
+	if (!repoMap.size && localRepoPaths.length) {
+		console.log(chalk.gray('\n  No repo URL found in ticket. Asking AI to identify the repo...'));
+		const aiMatched = await detectRepoWithAi(detail, localRepoPaths);
+		if (aiMatched.length) {
+			console.log(chalk.green(`  AI suggests: ${aiMatched.map((p) => path.basename(p)).join(', ')}`));
+			const confirmChoice = await askUserChoice('Use AI-suggested repo(s)?', [
+				{ id: 'yes', label: `Yes — use ${aiMatched.map((p) => path.basename(p)).join(', ')}` },
+				{ id: 'pick', label: 'No — let me pick manually' },
+			]);
+			if (confirmChoice === 'yes') {
+				for (const p of aiMatched) repoMap.set(path.basename(p), p);
+				await setCached(cacheKey, aiMatched);
+				return repoMap;
+			}
+		} else {
+			console.log(chalk.gray('  AI could not determine the repo either.'));
+		}
+	}
+
+	// --- Step 5: Ask user to pick or provide a URL ---
 	if (!repoMap.size) {
+		console.log(chalk.yellow('\n  ⚠ No repository URL found in the ticket description or acceptance criteria.'));
+		console.log(chalk.gray('  Please select a repo from the list below, or enter a URL.\n'));
+
 		if (!localRepoPaths.length) {
-			const manualPath = await askUser('No repos found. Enter a local repo path or repo URL: ');
+			const manualPath = await askUser('No local repos found. Enter a repo path or URL: ');
 			if (!manualPath) throw new Error('No repo path provided.');
 			const resolved = await resolveManualUrl(manualPath, localRepoPaths);
 			if (resolved) {
@@ -429,8 +534,7 @@ export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map
 		if (!rootDir || !existsSync(rootDir)) return repoMap;
 	}
 
-	const description = getDescriptionText(detail);
-	const ticketRepos = extractRepoLabels(description);
+	const ticketRepos = extractTicketRepoLabels(detail);
 	if (!ticketRepos.length) return repoMap;
 
 	const localRepoPaths = await scanLocalRepos(rootDir);
@@ -451,8 +555,7 @@ export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map
 }
 
 export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise<Map<string, string>> {
-	const description = getDescriptionText(detail);
-	const ticketRepos = extractRepoLabels(description);
+	const ticketRepos = extractTicketRepoLabels(detail);
 	const repoMap = new Map<string, string>();
 
 	const rootDir = await getCached<string>('rootDir');
