@@ -8,7 +8,7 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, gitExec } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
 import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText } from '../tools/jira/jira-text.js';
@@ -862,6 +862,81 @@ function partitionTodoItems(items: string[], numGroups: number): string[][] {
 	return groups.filter((g) => g.length > 0);
 }
 
+type TaskWave = {
+	wave: number;
+	tasks: string[];
+};
+
+async function classifyTaskDependencies(todoItems: string[]): Promise<TaskWave[]> {
+	if (todoItems.length <= 1) return [{ wave: 1, tasks: todoItems }];
+
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+
+	const numberedTasks = todoItems.map((item, i) => `${i + 1}. ${item}`).join('\n');
+	const prompt = [
+		'You are analyzing task dependencies for parallel execution.',
+		'Given a numbered list of tasks, group them into waves where:',
+		'- Wave 1: Tasks that can ALL be done independently (no dependencies on each other)',
+		'- Wave 2: Tasks that depend on any Wave 1 task completing first',
+		'- Wave 3: Tasks that depend on Wave 2, etc.',
+		'',
+		'Output requirements:',
+		'- Return ONLY lines in this exact format: "WAVE <number>: <task numbers comma-separated>"',
+		'- Example: "WAVE 1: 1, 3, 5" means tasks 1, 3, and 5 can run in parallel first.',
+		'- Example: "WAVE 2: 2, 4" means tasks 2 and 4 depend on wave 1 results.',
+		'- Use as FEW waves as possible. Most tasks are usually independent.',
+		'- No explanation, no other text.',
+		'',
+		'Tasks:',
+		numberedTasks,
+	].join('\n');
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
+		} else {
+			return [{ wave: 1, tasks: todoItems }];
+		}
+
+		const waves = new Map<number, string[]>();
+		for (const line of stdout.split('\n')) {
+			const match = line.match(/^WAVE\s+(\d+)\s*:\s*(.+)/i);
+			if (!match) continue;
+			const waveNum = parseInt(match[1], 10);
+			const taskNums = match[2].split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n) && n >= 1 && n <= todoItems.length);
+			if (taskNums.length === 0) continue;
+			const existing = waves.get(waveNum) ?? [];
+			for (const num of taskNums) {
+				existing.push(todoItems[num - 1]);
+			}
+			waves.set(waveNum, existing);
+		}
+
+		if (waves.size === 0) return [{ wave: 1, tasks: todoItems }];
+
+		// Ensure all tasks are assigned — any unassigned go to the last wave
+		const assignedSet = new Set(Array.from(waves.values()).flat());
+		const unassigned = todoItems.filter((t) => !assignedSet.has(t));
+		if (unassigned.length > 0) {
+			const lastWave = Math.max(...waves.keys());
+			const existing = waves.get(lastWave) ?? [];
+			existing.push(...unassigned);
+			waves.set(lastWave, existing);
+		}
+
+		const sorted = Array.from(waves.entries())
+			.sort(([a], [b]) => a - b)
+			.map(([wave, tasks]) => ({ wave, tasks }));
+
+		return sorted;
+	} catch {
+		return [{ wave: 1, tasks: todoItems }];
+	}
+}
+
 type SubAgentResult = {
 	index: number;
 	status: 'done' | 'failed';
@@ -944,10 +1019,12 @@ async function reconcileTodosAfterMerge(
 	}
 }
 
-async function dispatchParallelSubAgents(
+async function executeWave(
+	waveIndex: number,
+	waveTasks: string[],
+	allItems: string[],
 	detail: JiraIssueDetail,
 	agentOption: WorkAgentOption,
-	todoItems: string[],
 	effectivePath: string,
 	jiraUrl: string,
 	contributing: string | null,
@@ -955,20 +1032,16 @@ async function dispatchParallelSubAgents(
 	axonHint: string,
 	figmaSection: string,
 	referenceRepoPaths: string[],
-): Promise<SubAgentResult[]> {
+): Promise<{ results: SubAgentResult[]; merged: number; conflicts: string[] }> {
 	const maxAgents = getParallelSubAgentCount();
-	const agentCount = Math.min(maxAgents, todoItems.length);
-	const groups = partitionTodoItems(todoItems, agentCount);
+	const agentCount = Math.min(maxAgents, waveTasks.length);
+	const groups = partitionTodoItems(waveTasks, agentCount);
 
-	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents for ${detail.key} (isolated worktrees)...\n`));
-
-	await ensureLogDirs();
-
-	// Determine the current branch to use as parent for sub-agent branches
 	const parentBranch = detail.key.toUpperCase();
 	const repoPath = effectivePath;
 
-	// Create worktrees for each sub-agent
+	await ensureLogDirs();
+
 	const subWorktrees: string[] = [];
 	const subJobs: Array<{
 		index: number;
@@ -979,24 +1052,25 @@ async function dispatchParallelSubAgents(
 		worktreePath: string;
 	}> = [];
 
+	const globalSubIndex = 0;
 	for (let i = 0; i < groups.length; i++) {
 		const subItems = groups[i];
+		const subIdx = waveIndex * 100 + i; // unique index across waves
 		let wtPath: string;
 		try {
-			wtPath = await createSubAgentWorktree(repoPath, detail.key, i, parentBranch);
+			wtPath = await createSubAgentWorktree(repoPath, detail.key, subIdx, parentBranch);
 		} catch (err: unknown) {
-			console.log(chalk.red(`  ✗ Failed to create worktree for sub-agent ${i + 1}: ${err instanceof Error ? err.message : String(err)}`));
+			console.log(chalk.red(`  ✗ Failed to create worktree for agent ${i + 1}: ${err instanceof Error ? err.message : String(err)}`));
 			continue;
 		}
 		subWorktrees.push(wtPath);
 
-		// Write scoped todo file in the sub-agent's worktree
-		await writeSubAgentTodo(wtPath, detail.key, i, groups.length, subItems, todoItems);
+		await writeSubAgentTodo(wtPath, detail.key, i, groups.length, subItems, allItems);
 
 		const prompt = buildSubTaskPrompt(
 			detail,
 			subItems,
-			todoItems,
+			allItems,
 			i,
 			groups.length,
 			contributing ?? undefined,
@@ -1005,16 +1079,10 @@ async function dispatchParallelSubAgents(
 			figmaSection,
 		);
 
-		const { command, args, toolName } = resolveAgentCommand(
-			agentOption,
-			prompt,
-			wtPath,
-			jiraUrl,
-			referenceRepoPaths,
-		);
+		const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, wtPath, jiraUrl, referenceRepoPaths);
 
 		const safeKey = detail.key.replace(/[/\\]/g, '-');
-		const logFile = path.join(path.resolve(import.meta.dirname, '..', '.cache', 'logs'), `${safeKey}-sub${i + 1}-${Date.now()}.log`);
+		const logFile = path.join(path.resolve(import.meta.dirname, '..', '.cache', 'logs'), `${safeKey}-w${waveIndex + 1}-a${i + 1}-${Date.now()}.log`);
 		const logFd = await fsOpen(logFile, 'w');
 
 		const spawnEnv = agentOption.id === 'ollama-local'
@@ -1027,21 +1095,19 @@ async function dispatchParallelSubAgents(
 			...(spawnEnv ? { env: spawnEnv } : {}),
 		});
 
-		console.log(chalk.gray(`  Sub-agent ${i + 1}/${groups.length} (PID ${child.pid}): ${subItems.length} task(s) → ${toolName}`));
-		console.log(chalk.gray(`    Worktree: ${wtPath}`));
+		console.log(chalk.gray(`    Agent ${i + 1}/${groups.length} (PID ${child.pid}): ${subItems.length} task(s) → ${toolName}`));
 		for (const item of subItems) {
-			console.log(chalk.gray(`    • ${item}`));
+			console.log(chalk.gray(`      • ${item}`));
 		}
 
-		subJobs.push({ index: i, child, logFile, logFd, items: subItems, worktreePath: wtPath });
+		subJobs.push({ index: globalSubIndex + i, child, logFile, logFd, items: subItems, worktreePath: wtPath });
 	}
 
 	if (subJobs.length === 0) {
-		console.log(chalk.red('  No sub-agents could be launched.'));
-		return [];
+		return { results: [], merged: 0, conflicts: [] };
 	}
 
-	console.log(chalk.gray(`\n  All ${subJobs.length} sub-agents launched in isolated worktrees. Waiting for completion...\n`));
+	console.log(chalk.gray(`\n    Waiting for ${subJobs.length} agent(s)...\n`));
 
 	const results = await Promise.allSettled(
 		subJobs.map(
@@ -1069,47 +1135,112 @@ async function dispatchParallelSubAgents(
 			: { index: -1, status: 'failed' as const, error: 'Promise rejected', pid: 0, logFile: '' },
 	);
 
-	let doneCount = 0;
-	let failedCount = 0;
 	for (const result of finalResults) {
 		if (result.status === 'done') {
-			doneCount++;
-			console.log(chalk.green(`  ✓ Sub-agent ${result.index + 1} completed (PID ${result.pid})`));
+			console.log(chalk.green(`    ✓ Agent ${result.index - (waveIndex * 100) + 1} completed`));
 		} else {
-			failedCount++;
-			console.log(chalk.red(`  ✗ Sub-agent ${result.index + 1} failed: ${result.error}`));
-			console.log(chalk.gray(`    Log: ${result.logFile}`));
+			console.log(chalk.red(`    ✗ Agent ${result.index - (waveIndex * 100) + 1} failed: ${result.error}`));
 		}
 	}
 
-	// Merge sub-agent branches back into the main ticket branch
-	console.log(chalk.bold.cyan(`\n  Merging sub-agent branches into ${parentBranch}...\n`));
-	const { merged, conflicts } = await mergeSubAgentBranches(repoPath, detail.key, groups.length, parentBranch);
+	// Merge sub-agent branches back
+	const subCount = groups.length;
+	const { merged, conflicts } = await mergeSubAgentBranches(repoPath, detail.key, subCount, parentBranch);
 
-	if (conflicts.length > 0) {
-		console.log(chalk.yellow(`\n  ⚠ ${conflicts.length} branch(es) had merge conflicts: ${conflicts.join(', ')}`));
-		console.log(chalk.yellow('    These branches are preserved for manual resolution.'));
-	}
-
-	// Reconcile todo statuses from sub-agent worktrees into the main todo
+	// Reconcile todos
 	await reconcileTodosAfterMerge(repoPath, detail.key, groups, subWorktrees);
 
-	// Cleanup worktrees and sub-branches (skip conflicted ones)
-	const conflictSet = new Set(conflicts);
-	for (let i = 0; i < groups.length; i++) {
-		const subBranch = `${detail.key.toUpperCase()}-sub${i + 1}`;
-		if (conflictSet.has(subBranch)) continue;
+	// Cleanup worktrees
+	await cleanupSubAgentWorktrees(repoPath, detail.key, subCount);
+
+	return { results: finalResults, merged, conflicts };
+}
+
+async function dispatchParallelSubAgents(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	todoItems: string[],
+	effectivePath: string,
+	jiraUrl: string,
+	contributing: string | null,
+	clarifications: string,
+	axonHint: string,
+	figmaSection: string,
+	referenceRepoPaths: string[],
+): Promise<SubAgentResult[]> {
+	// Step 1: Classify tasks into dependency waves
+	console.log(chalk.gray('  Analyzing task dependencies...'));
+	const waves = await classifyTaskDependencies(todoItems);
+
+	if (waves.length === 1) {
+		console.log(chalk.gray(`  All ${todoItems.length} tasks are independent — running in a single parallel wave.`));
+	} else {
+		console.log(chalk.cyan(`  📊 Dependency analysis: ${waves.length} wave(s) detected:`));
+		for (const wave of waves) {
+			console.log(chalk.gray(`    Wave ${wave.wave}: ${wave.tasks.length} task(s)${wave.tasks.length > 1 ? ' (parallel)' : ''}`));
+		}
 	}
-	await cleanupSubAgentWorktrees(repoPath, detail.key, groups.length);
+
+	const allResults: SubAgentResult[] = [];
+	let totalMerged = 0;
+	const totalConflicts: string[] = [];
+
+	// Step 2: Execute wave by wave
+	for (let w = 0; w < waves.length; w++) {
+		const wave = waves[w];
+
+		console.log(chalk.bold.cyan(`\n  ── Wave ${w + 1}/${waves.length}: ${wave.tasks.length} task(s) ──`));
+
+		if (wave.tasks.length === 1) {
+			// Single task in wave — still use worktree for isolation
+			console.log(chalk.gray(`    Single task — running one agent.`));
+		}
+
+		const { results, merged, conflicts } = await executeWave(
+			w,
+			wave.tasks,
+			todoItems,
+			detail,
+			agentOption,
+			effectivePath,
+			jiraUrl,
+			contributing,
+			clarifications,
+			axonHint,
+			figmaSection,
+			referenceRepoPaths,
+		);
+
+		allResults.push(...results);
+		totalMerged += merged;
+		totalConflicts.push(...conflicts);
+
+		const doneCount = results.filter((r) => r.status === 'done').length;
+		const failedCount = results.filter((r) => r.status === 'failed').length;
+
+		if (conflicts.length > 0) {
+			console.log(chalk.yellow(`\n    ⚠ Wave ${w + 1}: ${conflicts.length} merge conflict(s): ${conflicts.join(', ')}`));
+		}
+
+		if (doneCount > 0) {
+			console.log(chalk.green(`    ✓ Wave ${w + 1} complete: ${doneCount} succeeded, ${failedCount} failed, ${merged} merged`));
+		}
+
+		// Next wave will branch off the merged state
+	}
+
+	// Summary
+	const totalDone = allResults.filter((r) => r.status === 'done').length;
+	const totalFailed = allResults.filter((r) => r.status === 'failed').length;
 
 	console.log('');
-	if (failedCount === 0 && conflicts.length === 0) {
-		console.log(chalk.bold.green(`  ✓ All ${doneCount} sub-agents completed and merged successfully.`));
+	if (totalFailed === 0 && totalConflicts.length === 0) {
+		console.log(chalk.bold.green(`  ✓ All ${totalDone} agents across ${waves.length} wave(s) completed and merged successfully.`));
 	} else {
-		console.log(chalk.bold.yellow(`  ${merged} merged, ${conflicts.length} conflicts, ${failedCount} failed out of ${finalResults.length} sub-agents.`));
+		console.log(chalk.bold.yellow(`  ${totalMerged} merged, ${totalConflicts.length} conflicts, ${totalFailed} failed across ${waves.length} wave(s).`));
 	}
 
-	return finalResults;
+	return allResults;
 }
 
 async function dispatchParallelSubAgentsBackground(
