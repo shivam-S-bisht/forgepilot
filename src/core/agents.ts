@@ -8,7 +8,7 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, gitExec } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
 import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText } from '../tools/jira/jira-text.js';
@@ -868,7 +868,81 @@ type SubAgentResult = {
 	error?: string;
 	pid: number;
 	logFile: string;
+	worktreePath?: string;
 };
+
+async function writeSubAgentTodo(
+	worktreePath: string,
+	ticketKey: string,
+	subIndex: number,
+	totalSubAgents: number,
+	subItems: string[],
+	allItems: string[],
+): Promise<void> {
+	const safeKey = ticketKey.toUpperCase().replace(/[/\\]/g, '-');
+	const todoPath = path.join(worktreePath, `.forgepilot-todos-${safeKey}.md`);
+	const lines = [
+		`# ${ticketKey} — Sub-agent ${subIndex + 1}/${totalSubAgents}`,
+		'',
+		'## Your Tasks',
+		...subItems.map((item) => `- [ ] ${item}`),
+		'',
+		'## Other Tasks (handled by other agents — do NOT work on these)',
+		...allItems
+			.filter((item) => !subItems.includes(item))
+			.map((item) => `- [~] ${item}`),
+		'',
+	];
+	await fs.writeFile(todoPath, lines.join('\n'), 'utf8');
+}
+
+async function reconcileTodosAfterMerge(
+	mainPath: string,
+	ticketKey: string,
+	groups: string[][],
+	subWorktrees: string[],
+): Promise<void> {
+	const completedSet = new Set<string>();
+	const safeKey = ticketKey.toUpperCase().replace(/[/\\]/g, '-');
+
+	for (const wtPath of subWorktrees) {
+		const todoPath = path.join(wtPath, `.forgepilot-todos-${safeKey}.md`);
+		try {
+			const content = await fs.readFile(todoPath, 'utf8');
+			for (const line of content.split('\n')) {
+				const checkedMatch = line.match(/^-\s*\[x\]\s+(.+)/i);
+				if (checkedMatch) completedSet.add(checkedMatch[1].trim());
+			}
+		} catch { /* worktree may be cleaned up already */ }
+	}
+
+	if (completedSet.size === 0) return;
+
+	const allItems = groups.flat();
+	const mainTodoPath = path.join(mainPath, `.forgepilot-todos-${safeKey}.md`);
+	try {
+		const mainContent = await fs.readFile(mainTodoPath, 'utf8');
+		const updated = mainContent.split('\n').map((line) => {
+			const uncheckedMatch = line.match(/^-\s*\[\s\]\s+(.+)/);
+			if (uncheckedMatch && completedSet.has(uncheckedMatch[1].trim())) {
+				return line.replace('- [ ]', '- [x]');
+			}
+			return line;
+		}).join('\n');
+		await fs.writeFile(mainTodoPath, updated, 'utf8');
+		console.log(chalk.green(`  ✓ Updated main todo: ${completedSet.size}/${allItems.length} tasks marked complete`));
+	} catch {
+		// Main todo doesn't exist yet — create one with statuses
+		const lines = [
+			`# ${ticketKey}`,
+			'',
+			...allItems.map((item) => completedSet.has(item) ? `- [x] ${item}` : `- [ ] ${item}`),
+			'',
+		];
+		await fs.writeFile(mainTodoPath, lines.join('\n'), 'utf8');
+		console.log(chalk.green(`  ✓ Created main todo: ${completedSet.size}/${allItems.length} tasks marked complete`));
+	}
+}
 
 async function dispatchParallelSubAgents(
 	detail: JiraIssueDetail,
@@ -886,20 +960,39 @@ async function dispatchParallelSubAgents(
 	const agentCount = Math.min(maxAgents, todoItems.length);
 	const groups = partitionTodoItems(todoItems, agentCount);
 
-	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents for ${detail.key}...\n`));
+	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents for ${detail.key} (isolated worktrees)...\n`));
 
 	await ensureLogDirs();
 
+	// Determine the current branch to use as parent for sub-agent branches
+	const parentBranch = detail.key.toUpperCase();
+	const repoPath = effectivePath;
+
+	// Create worktrees for each sub-agent
+	const subWorktrees: string[] = [];
 	const subJobs: Array<{
 		index: number;
 		child: ReturnType<typeof spawn>;
 		logFile: string;
 		logFd: Awaited<ReturnType<typeof fsOpen>>;
 		items: string[];
+		worktreePath: string;
 	}> = [];
 
 	for (let i = 0; i < groups.length; i++) {
 		const subItems = groups[i];
+		let wtPath: string;
+		try {
+			wtPath = await createSubAgentWorktree(repoPath, detail.key, i, parentBranch);
+		} catch (err: unknown) {
+			console.log(chalk.red(`  ✗ Failed to create worktree for sub-agent ${i + 1}: ${err instanceof Error ? err.message : String(err)}`));
+			continue;
+		}
+		subWorktrees.push(wtPath);
+
+		// Write scoped todo file in the sub-agent's worktree
+		await writeSubAgentTodo(wtPath, detail.key, i, groups.length, subItems, todoItems);
+
 		const prompt = buildSubTaskPrompt(
 			detail,
 			subItems,
@@ -915,7 +1008,7 @@ async function dispatchParallelSubAgents(
 		const { command, args, toolName } = resolveAgentCommand(
 			agentOption,
 			prompt,
-			effectivePath,
+			wtPath,
 			jiraUrl,
 			referenceRepoPaths,
 		);
@@ -930,34 +1023,40 @@ async function dispatchParallelSubAgents(
 
 		const child = spawn(command, args, {
 			stdio: ['ignore', logFd.fd, logFd.fd],
-			cwd: effectivePath,
+			cwd: wtPath,
 			...(spawnEnv ? { env: spawnEnv } : {}),
 		});
 
 		console.log(chalk.gray(`  Sub-agent ${i + 1}/${groups.length} (PID ${child.pid}): ${subItems.length} task(s) → ${toolName}`));
+		console.log(chalk.gray(`    Worktree: ${wtPath}`));
 		for (const item of subItems) {
 			console.log(chalk.gray(`    • ${item}`));
 		}
 
-		subJobs.push({ index: i, child, logFile, logFd, items: subItems });
+		subJobs.push({ index: i, child, logFile, logFd, items: subItems, worktreePath: wtPath });
 	}
 
-	console.log(chalk.gray(`\n  All ${groups.length} sub-agents launched. Waiting for completion...\n`));
+	if (subJobs.length === 0) {
+		console.log(chalk.red('  No sub-agents could be launched.'));
+		return [];
+	}
+
+	console.log(chalk.gray(`\n  All ${subJobs.length} sub-agents launched in isolated worktrees. Waiting for completion...\n`));
 
 	const results = await Promise.allSettled(
 		subJobs.map(
-			({ index, child, logFile, logFd }) =>
+			({ index, child, logFile, logFd, worktreePath }) =>
 				new Promise<SubAgentResult>((resolve) => {
 					child.on('error', async (err) => {
 						await logFd.close();
-						resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile });
+						resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile, worktreePath });
 					});
 					child.on('exit', async (code) => {
 						await logFd.close();
 						if (code === 0) {
-							resolve({ index, status: 'done', pid: child.pid ?? 0, logFile });
+							resolve({ index, status: 'done', pid: child.pid ?? 0, logFile, worktreePath });
 						} else {
-							resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile });
+							resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile, worktreePath });
 						}
 					});
 				}),
@@ -983,11 +1082,31 @@ async function dispatchParallelSubAgents(
 		}
 	}
 
+	// Merge sub-agent branches back into the main ticket branch
+	console.log(chalk.bold.cyan(`\n  Merging sub-agent branches into ${parentBranch}...\n`));
+	const { merged, conflicts } = await mergeSubAgentBranches(repoPath, detail.key, groups.length, parentBranch);
+
+	if (conflicts.length > 0) {
+		console.log(chalk.yellow(`\n  ⚠ ${conflicts.length} branch(es) had merge conflicts: ${conflicts.join(', ')}`));
+		console.log(chalk.yellow('    These branches are preserved for manual resolution.'));
+	}
+
+	// Reconcile todo statuses from sub-agent worktrees into the main todo
+	await reconcileTodosAfterMerge(repoPath, detail.key, groups, subWorktrees);
+
+	// Cleanup worktrees and sub-branches (skip conflicted ones)
+	const conflictSet = new Set(conflicts);
+	for (let i = 0; i < groups.length; i++) {
+		const subBranch = `${detail.key.toUpperCase()}-sub${i + 1}`;
+		if (conflictSet.has(subBranch)) continue;
+	}
+	await cleanupSubAgentWorktrees(repoPath, detail.key, groups.length);
+
 	console.log('');
-	if (failedCount === 0) {
-		console.log(chalk.bold.green(`  ✓ All ${doneCount} sub-agents completed successfully.`));
+	if (failedCount === 0 && conflicts.length === 0) {
+		console.log(chalk.bold.green(`  ✓ All ${doneCount} sub-agents completed and merged successfully.`));
 	} else {
-		console.log(chalk.bold.yellow(`  ${doneCount} succeeded, ${failedCount} failed out of ${finalResults.length} sub-agents.`));
+		console.log(chalk.bold.yellow(`  ${merged} merged, ${conflicts.length} conflicts, ${failedCount} failed out of ${finalResults.length} sub-agents.`));
 	}
 
 	return finalResults;
@@ -1009,12 +1128,25 @@ async function dispatchParallelSubAgentsBackground(
 	const agentCount = Math.min(maxAgents, todoItems.length);
 	const groups = partitionTodoItems(todoItems, agentCount);
 
-	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents in background for ${detail.key}...\n`));
+	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents in background for ${detail.key} (isolated worktrees)...\n`));
+
+	const parentBranch = detail.key.toUpperCase();
+	const repoPath = effectivePath;
 
 	const jobs: JobRecord[] = [];
 
 	for (let i = 0; i < groups.length; i++) {
 		const subItems = groups[i];
+		let wtPath: string;
+		try {
+			wtPath = await createSubAgentWorktree(repoPath, detail.key, i, parentBranch);
+		} catch (err: unknown) {
+			console.log(chalk.red(`  ✗ Failed to create worktree for sub-agent ${i + 1}: ${err instanceof Error ? err.message : String(err)}`));
+			continue;
+		}
+
+		await writeSubAgentTodo(wtPath, detail.key, i, groups.length, subItems, todoItems);
+
 		const prompt = buildSubTaskPrompt(
 			detail,
 			subItems,
@@ -1030,7 +1162,7 @@ async function dispatchParallelSubAgentsBackground(
 		const ticketTitle = String(detail.fields.summary ?? detail.key);
 		const subTicketKey = `${detail.key}-sub${i + 1}`;
 
-		const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+		const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, wtPath, jiraUrl, referenceRepoPaths);
 
 		const job = await runCommandBackground(
 			command,
@@ -1038,17 +1170,23 @@ async function dispatchParallelSubAgentsBackground(
 			toolName,
 			subTicketKey,
 			`${ticketTitle} (sub-agent ${i + 1}/${groups.length})`,
-			[effectivePath],
-			effectivePath,
+			[wtPath],
+			wtPath,
 			agentOption.id,
 		);
 
 		jobs.push(job);
 
 		console.log(chalk.gray(`  Sub-agent ${i + 1}/${groups.length} (PID ${job.pid}): ${subItems.length} task(s)`));
+		console.log(chalk.gray(`    Worktree: ${wtPath}`));
 		for (const item of subItems) {
 			console.log(chalk.gray(`    • ${item}`));
 		}
+	}
+
+	if (jobs.length > 0) {
+		console.log(chalk.gray(`\n  ℹ  Background sub-agents will need manual merge after completion:`));
+		console.log(chalk.gray(`     Run: git checkout ${parentBranch} && git merge ${detail.key.toUpperCase()}-sub1 ${detail.key.toUpperCase()}-sub2 ...`));
 	}
 
 	return jobs;

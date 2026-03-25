@@ -128,6 +128,108 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
 	}
 }
 
+export function getSubAgentWorktreePath(repoPath: string, ticketKey: string, subIndex: number): string {
+	const repoName = path.basename(repoPath);
+	return path.join(getWorktreeBaseDir(), `${repoName}--${ticketKey.toUpperCase()}-sub${subIndex + 1}`);
+}
+
+export async function createSubAgentWorktree(
+	repoPath: string,
+	ticketKey: string,
+	subIndex: number,
+	parentBranch: string,
+): Promise<string> {
+	const subBranch = `${ticketKey.toUpperCase()}-sub${subIndex + 1}`;
+	const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, subIndex);
+
+	await fs.mkdir(path.dirname(wtPath), { recursive: true });
+
+	if (existsSync(wtPath)) {
+		console.log(chalk.gray(`  Sub-agent worktree ${wtPath} already exists, removing...`));
+		try {
+			await gitExec(repoPath, ['worktree', 'remove', wtPath, '--force']);
+		} catch { /* ignore */ }
+		if (await branchExists(repoPath, subBranch)) {
+			try { await gitExec(repoPath, ['branch', '-D', subBranch]); } catch { /* ignore */ }
+		}
+	}
+
+	if (await branchExists(repoPath, subBranch)) {
+		try { await gitExec(repoPath, ['branch', '-D', subBranch]); } catch { /* ignore */ }
+	}
+
+	console.log(chalk.gray(`  Creating sub-agent worktree: ${subBranch} from ${parentBranch}`));
+	await gitExec(repoPath, ['worktree', 'add', '-b', subBranch, wtPath, parentBranch]);
+
+	const axonSource = path.join(repoPath, '.axon');
+	const axonTarget = path.join(wtPath, '.axon');
+	if (existsSync(axonSource) && !existsSync(axonTarget)) {
+		try { await fs.symlink(axonSource, axonTarget); } catch { /* ignore */ }
+	}
+
+	return wtPath;
+}
+
+export async function mergeSubAgentBranches(
+	repoPath: string,
+	ticketKey: string,
+	subCount: number,
+	mainBranch: string,
+): Promise<{ merged: number; conflicts: string[] }> {
+	await gitExec(repoPath, ['checkout', mainBranch]);
+
+	let merged = 0;
+	const conflicts: string[] = [];
+
+	for (let i = 0; i < subCount; i++) {
+		const subBranch = `${ticketKey.toUpperCase()}-sub${i + 1}`;
+		if (!(await branchExists(repoPath, subBranch))) continue;
+
+		try {
+			const diffOutput = await gitExec(repoPath, ['diff', mainBranch, subBranch, '--stat']);
+			if (!diffOutput.trim()) {
+				console.log(chalk.gray(`  Sub-agent ${i + 1}: no changes to merge`));
+				continue;
+			}
+
+			await gitExec(repoPath, ['merge', subBranch, '--no-edit', '-m', `Merge sub-agent ${i + 1} (${subBranch})`]);
+			merged++;
+			console.log(chalk.green(`  ✓ Merged ${subBranch} into ${mainBranch}`));
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.includes('CONFLICT') || msg.includes('conflict')) {
+				console.log(chalk.yellow(`  ⚠ Merge conflict from ${subBranch} — aborting this merge`));
+				try { await gitExec(repoPath, ['merge', '--abort']); } catch { /* ignore */ }
+				conflicts.push(subBranch);
+			} else {
+				console.log(chalk.red(`  ✗ Failed to merge ${subBranch}: ${msg}`));
+				try { await gitExec(repoPath, ['merge', '--abort']); } catch { /* ignore */ }
+				conflicts.push(subBranch);
+			}
+		}
+	}
+
+	return { merged, conflicts };
+}
+
+export async function cleanupSubAgentWorktrees(
+	repoPath: string,
+	ticketKey: string,
+	subCount: number,
+): Promise<void> {
+	for (let i = 0; i < subCount; i++) {
+		const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, i);
+		const subBranch = `${ticketKey.toUpperCase()}-sub${i + 1}`;
+		try {
+			await gitExec(repoPath, ['worktree', 'remove', wtPath, '--force']);
+		} catch { /* ignore */ }
+		try {
+			await gitExec(repoPath, ['branch', '-D', subBranch]);
+		} catch { /* ignore */ }
+	}
+	console.log(chalk.gray(`  Cleaned up ${subCount} sub-agent worktrees/branches`));
+}
+
 type BugBranchStrategy = {
 	baseBranch: string;
 	skipNewBranch: boolean;
