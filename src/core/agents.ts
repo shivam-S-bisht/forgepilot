@@ -1380,6 +1380,12 @@ async function generateTodoPlan(
 	}
 }
 
+const APPROVAL_PHRASES = /^\s*(looks\s*good|(?:it(?:'s|\s+is)\s+)?(?:good|fine|ok(?:ay)?|perfect|great|nice|correct|lgtm|approve|no\s*change[s]?|nothing|none|nope|nah|all\s*good|that(?:'s|\s+is)\s*(?:good|fine|it|all)))\s*[.!]?\s*$/i;
+
+function looksLikeApproval(text: string): boolean {
+	return !text.trim() || APPROVAL_PHRASES.test(text);
+}
+
 async function reviewTodoPlan(
 	items: string[],
 	detail: JiraIssueDetail,
@@ -1408,13 +1414,17 @@ async function reviewTodoPlan(
 		]);
 
 		if (choice.startsWith('__unmatched__:')) {
-			const modifications = choice.slice('__unmatched__:'.length);
-			lastModifications = modifications;
+			const freeText = choice.slice('__unmatched__:'.length);
+			if (looksLikeApproval(freeText)) {
+				console.log(chalk.green('  ✓ Approving current plan.'));
+				return { approved: items, action: 'approve', lastModifications };
+			}
+			lastModifications = freeText;
 			console.log(chalk.gray('  Treating your response as a plan modification...'));
 			if (isVoiceModeActive()) {
 				printAndSpeak('Updating the plan with your feedback.');
 			}
-			const updated = await generateTodoPlan(detail, contributing, clarifications, modifications);
+			const updated = await generateTodoPlan(detail, contributing, clarifications, freeText);
 			if (updated) {
 				items = updated;
 			} else {
@@ -1433,7 +1443,10 @@ async function reviewTodoPlan(
 
 		if (choice === 'modify') {
 			const modifications = await askUser(chalk.cyan('  What should be changed? '));
-			if (!modifications) continue;
+			if (!modifications || looksLikeApproval(modifications)) {
+				console.log(chalk.green('  ✓ No changes — keeping current plan.'));
+				continue;
+			}
 			lastModifications = modifications;
 
 			console.log(chalk.gray('  Regenerating plan with your modifications...'));
@@ -1538,13 +1551,17 @@ async function reviewCustomTodoPlan(
 		]);
 
 		if (choice.startsWith('__unmatched__:')) {
-			const modifications = choice.slice('__unmatched__:'.length);
-			lastModifications = modifications;
+			const freeText = choice.slice('__unmatched__:'.length);
+			if (looksLikeApproval(freeText)) {
+				console.log(chalk.green('  ✓ Approving current plan.'));
+				return { approved: items, action: 'approve', lastModifications };
+			}
+			lastModifications = freeText;
 			console.log(chalk.gray('  Treating your response as a plan modification...'));
 			if (isVoiceModeActive()) {
 				printAndSpeak('Updating the plan with your feedback.');
 			}
-			const updated = await generateCustomTodoPlan(taskDescription, contributing, clarifications, modifications);
+			const updated = await generateCustomTodoPlan(taskDescription, contributing, clarifications, freeText);
 			if (updated) {
 				items = updated;
 			} else {
@@ -1563,7 +1580,10 @@ async function reviewCustomTodoPlan(
 
 		if (choice === 'modify') {
 			const modifications = await askUser(chalk.cyan('  What should be changed? '));
-			if (!modifications) continue;
+			if (!modifications || looksLikeApproval(modifications)) {
+				console.log(chalk.green('  ✓ No changes — keeping current plan.'));
+				continue;
+			}
 			lastModifications = modifications;
 
 			console.log(chalk.gray('  Regenerating plan with your modifications...'));
