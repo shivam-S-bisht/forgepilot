@@ -399,3 +399,92 @@ export function renderJobList(jobs: JobRecord[], selectedIndex: number) {
 	}
 	console.log(chalk.gray('-'.repeat(90)));
 }
+
+// ---------------------------------------------------------------------------
+// Sub-agent monitor (interactive dashboard during parallel execution)
+// ---------------------------------------------------------------------------
+
+export interface SubAgentEntry {
+	index: number;
+	status: 'running' | 'done' | 'failed';
+	taskCount: number;
+	tasks: string[];
+	logFile: string;
+	pid: number;
+}
+
+export function renderSubAgentDashboard(
+	ticketKey: string,
+	waveIndex: number,
+	totalWaves: number,
+	agents: SubAgentEntry[],
+	selectedIndex: number,
+	elapsedSec: number,
+) {
+	clearScreen();
+	const mins = Math.floor(elapsedSec / 60);
+	const secs = elapsedSec % 60;
+	const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+	const running = agents.filter((a) => a.status === 'running').length;
+	const done = agents.filter((a) => a.status === 'done').length;
+	const failed = agents.filter((a) => a.status === 'failed').length;
+
+	console.log(chalk.bold(`${ticketKey} — Wave ${waveIndex + 1}/${totalWaves}: ${agents.length} sub-agent(s)`));
+	console.log(chalk.gray(`  ⏱ ${timeStr}  |  ${chalk.cyan(`${running} running`)}  ${chalk.green(`${done} done`)}  ${chalk.red(`${failed} failed`)}`));
+	console.log(chalk.gray('Keys: ↑/↓ navigate, Enter view logs, q/Esc close monitor'));
+	console.log(chalk.gray('='.repeat(90)));
+
+	for (let i = 0; i < agents.length; i++) {
+		const a = agents[i];
+		const pointer = i === selectedIndex ? chalk.bold.cyan('▶') : ' ';
+		let badge: string;
+		switch (a.status) {
+			case 'running': badge = chalk.cyan('⟳ Working'); break;
+			case 'done': badge = chalk.green('✓ Done'); break;
+			case 'failed': badge = chalk.red('✗ Failed'); break;
+		}
+		const label = i === selectedIndex
+			? chalk.bold.white(`Agent ${a.index + 1}`)
+			: chalk.white(`Agent ${a.index + 1}`);
+		const detail = i === selectedIndex
+			? chalk.bold(`${a.taskCount} task(s) — PID ${a.pid}`)
+			: chalk.gray(`${a.taskCount} task(s) — PID ${a.pid}`);
+		console.log(`${pointer} ${badge}  ${label}  ${detail}`);
+
+		if (i === selectedIndex) {
+			for (const task of a.tasks) {
+				console.log(chalk.gray(`     • ${task}`));
+			}
+		}
+	}
+	console.log(chalk.gray('-'.repeat(90)));
+}
+
+export function renderSubAgentLogViewer(
+	ticketKey: string,
+	agentIndex: number,
+	status: 'running' | 'done' | 'failed',
+	logLines: string[],
+) {
+	clearScreen();
+	const badge = status === 'running' ? chalk.cyan('⟳ Working')
+		: status === 'done' ? chalk.green('✓ Done')
+		: chalk.red('✗ Failed');
+
+	console.log(chalk.bold(`${ticketKey} — Agent ${agentIndex + 1} Logs`));
+	console.log(`  Status: ${badge}`);
+	console.log(chalk.gray('='.repeat(90)));
+
+	const tail = logLines.slice(-LOG_TAIL_LINES);
+	if (tail.length === 0) {
+		console.log(chalk.gray('  (no output yet)'));
+	} else {
+		for (const line of tail) {
+			console.log(chalk.white(`  ${line}`));
+		}
+	}
+
+	console.log(chalk.gray('='.repeat(90)));
+	console.log(chalk.gray('  Keys: q/Esc back to dashboard'));
+}

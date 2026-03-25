@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { open as fsOpen } from 'node:fs/promises';
 import path from 'node:path';
+import readline from 'node:readline';
 import { promisify } from 'node:util';
 import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
@@ -21,6 +22,8 @@ import { ensureLogDirs, getLogFilePath, registerJob, updateJob } from './job-man
 import type { JobRecord } from './job-manager.js';
 import { askUser, askUserChoice } from './ask.js';
 import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
+import { renderSubAgentDashboard, renderSubAgentLogViewer, clearScreen } from './ui.js';
+import type { SubAgentEntry } from './ui.js';
 import {
 	isOllamaInstalled,
 	ensureOllamaServing,
@@ -1059,6 +1062,7 @@ async function reconcileTodosAfterMerge(
 
 async function executeWave(
 	waveIndex: number,
+	totalWaves: number,
 	waveTasks: string[],
 	allItems: string[],
 	detail: JiraIssueDetail,
@@ -1090,7 +1094,6 @@ async function executeWave(
 		worktreePath: string;
 	}> = [];
 
-	const globalSubIndex = 0;
 	for (let i = 0; i < groups.length; i++) {
 		const subItems = groups[i];
 		const subIdx = waveIndex * 100 + i; // unique index across waves
@@ -1138,46 +1141,140 @@ async function executeWave(
 			console.log(chalk.gray(`      • ${item}`));
 		}
 
-		subJobs.push({ index: globalSubIndex + i, child, logFile, logFd, items: subItems, worktreePath: wtPath });
+		subJobs.push({ index: i, child, logFile, logFd, items: subItems, worktreePath: wtPath });
 	}
 
 	if (subJobs.length === 0) {
 		return { results: [], merged: 0, conflicts: [] };
 	}
 
-	console.log(chalk.gray(`\n    Waiting for ${subJobs.length} agent(s)...\n`));
+	// ── Interactive sub-agent monitor ──────────────────────────────────
+	const agentEntries: SubAgentEntry[] = subJobs.map((j) => ({
+		index: j.index,
+		status: 'running' as const,
+		taskCount: j.items.length,
+		tasks: j.items,
+		logFile: j.logFile,
+		pid: j.child.pid ?? 0,
+	}));
 
-	const results = await Promise.allSettled(
-		subJobs.map(
-			({ index, child, logFile, logFd, worktreePath }) =>
-				new Promise<SubAgentResult>((resolve) => {
-					child.on('error', async (err) => {
-						await logFd.close();
-						resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile, worktreePath });
-					});
-					child.on('exit', async (code) => {
-						await logFd.close();
-						if (code === 0) {
-							resolve({ index, status: 'done', pid: child.pid ?? 0, logFile, worktreePath });
-						} else {
-							resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile, worktreePath });
-						}
-					});
-				}),
-		),
+	const finalResults: SubAgentResult[] = [];
+
+	const completionPromises = subJobs.map(
+		({ index, child, logFile, logFd, worktreePath }) =>
+			new Promise<SubAgentResult>((resolve) => {
+				child.on('error', async (err) => {
+					const entry = agentEntries.find((e) => e.index === index);
+					if (entry) entry.status = 'failed';
+					await logFd.close();
+					resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile, worktreePath });
+				});
+				child.on('exit', async (code) => {
+					const entry = agentEntries.find((e) => e.index === index);
+					if (entry) entry.status = code === 0 ? 'done' : 'failed';
+					await logFd.close();
+					if (code === 0) {
+						resolve({ index, status: 'done', pid: child.pid ?? 0, logFile, worktreePath });
+					} else {
+						resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile, worktreePath });
+					}
+				});
+			}),
 	);
 
-	const finalResults: SubAgentResult[] = results.map((r) =>
-		r.status === 'fulfilled'
-			? r.value
-			: { index: -1, status: 'failed' as const, error: 'Promise rejected', pid: 0, logFile: '' },
-	);
+	// Interactive dashboard with keyboard input
+	const startTime = Date.now();
+	let monitorSelected = 0;
+	let viewingLogIndex = -1; // -1 = dashboard view
 
-	for (const result of finalResults) {
-		if (result.status === 'done') {
-			console.log(chalk.green(`    ✓ Agent ${result.index - (waveIndex * 100) + 1} completed`));
+	const redrawMonitor = async () => {
+		const elapsed = Math.round((Date.now() - startTime) / 1000);
+		if (viewingLogIndex >= 0) {
+			const entry = agentEntries[viewingLogIndex];
+			let logLines: string[] = [];
+			try {
+				const content = await fs.readFile(entry.logFile, 'utf8');
+				logLines = content.split('\n');
+			} catch { /* no log yet */ }
+			renderSubAgentLogViewer(detail.key, entry.index, entry.status, logLines);
 		} else {
-			console.log(chalk.red(`    ✗ Agent ${result.index - (waveIndex * 100) + 1} failed: ${result.error}`));
+			renderSubAgentDashboard(detail.key, waveIndex, totalWaves, agentEntries, monitorSelected, elapsed);
+		}
+	};
+
+	// Set up raw-mode keyboard handling
+	const wasRaw = process.stdin.isRaw;
+	if (process.stdin.isTTY) {
+		process.stdin.setRawMode(true);
+		process.stdin.resume();
+	}
+
+	readline.emitKeypressEvents(process.stdin);
+
+	const onKeypress = (_str: string | undefined, key: readline.Key) => {
+		if (!key) return;
+
+		if (viewingLogIndex >= 0) {
+			// In log viewer — Escape/q goes back to dashboard
+			if (key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
+				viewingLogIndex = -1;
+				void redrawMonitor();
+			}
+			return;
+		}
+
+		// Dashboard view
+		if (key.name === 'up') {
+			monitorSelected = monitorSelected === 0 ? agentEntries.length - 1 : monitorSelected - 1;
+			void redrawMonitor();
+		} else if (key.name === 'down') {
+			monitorSelected = monitorSelected === agentEntries.length - 1 ? 0 : monitorSelected + 1;
+			void redrawMonitor();
+		} else if (key.name === 'return' || key.name === 'enter') {
+			viewingLogIndex = monitorSelected;
+			void redrawMonitor();
+		} else if (key.name === 'q' || key.name === 'escape') {
+			// Close monitor — just stay, agents keep running
+		}
+	};
+
+	process.stdin.on('keypress', onKeypress);
+
+	// Auto-refresh every 2s
+	const refreshInterval = setInterval(() => { void redrawMonitor(); }, 2000);
+
+	// Initial draw
+	await redrawMonitor();
+
+	// Wait for all agents
+	const results = await Promise.allSettled(completionPromises);
+
+	// Cleanup interactive mode
+	clearInterval(refreshInterval);
+	process.stdin.removeListener('keypress', onKeypress);
+	if (process.stdin.isTTY) {
+		process.stdin.setRawMode(wasRaw ?? false);
+	}
+
+	// Final draw showing all done
+	await redrawMonitor();
+
+	for (const r of results) {
+		if (r.status === 'fulfilled') {
+			finalResults.push(r.value);
+		} else {
+			finalResults.push({ index: -1, status: 'failed' as const, error: 'Promise rejected', pid: 0, logFile: '' });
+		}
+	}
+
+	// Show summary before merge
+	clearScreen();
+	for (const result of finalResults) {
+		const agentNum = result.index + 1;
+		if (result.status === 'done') {
+			console.log(chalk.green(`    ✓ Agent ${agentNum}/${groups.length} completed`));
+		} else {
+			console.log(chalk.red(`    ✗ Agent ${agentNum}/${groups.length} failed: ${result.error}`));
 		}
 	}
 
@@ -1236,6 +1333,7 @@ async function dispatchParallelSubAgents(
 
 		const { results, merged, conflicts } = await executeWave(
 			w,
+			waves.length,
 			wave.tasks,
 			todoItems,
 			detail,
