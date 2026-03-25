@@ -503,27 +503,30 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					inAgentPicker = false;
 
 					clearScreen();
-					console.log(chalk.bold(`Launching ${selectedOption.label} for ${selectedTicket.key} in background...`));
+					console.log(chalk.bold(`Launching ${selectedOption.label} for ${selectedTicket.key}...`));
 
 					isAwaitingInput = true;
 					if (process.stdin.isTTY) process.stdin.setRawMode(false);
+					let launchFailed = false;
+					let launchErrorMessage = '';
 					try {
 						const repoPaths = await resolveRepoPathsFromUser(selectedDetail);
 						lastResolvedPaths = repoPaths;
 						await launchAgentInBackground(selectedDetail, selectedOption, repoPaths);
 						await refreshJobStatuses();
-						console.log(chalk.green(`  ✓ ${selectedOption.label} launched in background for ${selectedTicket.key}`));
 					} catch (error) {
-						const msg = error instanceof Error ? error.message : String(error);
-						console.log(chalk.red(`  Failed to launch: ${msg}`));
+						launchFailed = true;
+						launchErrorMessage = error instanceof Error ? error.message : String(error);
 					} finally {
 						isAwaitingInput = false;
 						if (process.stdin.isTTY) process.stdin.setRawMode(true);
 					}
 
-					inDetailView = false;
-					await new Promise((r) => setTimeout(r, 1500));
-					redrawList();
+					showPostAgentPrompt = true;
+					postAgentMessage = launchFailed
+						? chalk.red(`Failed to start ${selectedOption.label}: ${launchErrorMessage}`)
+						: chalk.green(`${selectedOption.label} finished for ${selectedTicket.key}. Review output and choose next step.`);
+					renderPostAgentPrompt(selectedTicket, postAgentMessage);
 					return;
 				}
 				return;
@@ -551,27 +554,30 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 					if (defaultOption) {
 						lastAgentOption = defaultOption;
 						clearScreen();
-						console.log(chalk.bold(`Launching ${defaultOption.label} for ${selected.key} in background...`));
+						console.log(chalk.bold(`Launching ${defaultOption.label} for ${selected.key}...`));
 
 						isAwaitingInput = true;
 						if (process.stdin.isTTY) process.stdin.setRawMode(false);
+						let wLaunchFailed = false;
+						let wLaunchError = '';
 						try {
 							const repoPaths = await resolveRepoPathsFromUser(selected.detail);
 							lastResolvedPaths = repoPaths;
 							await launchAgentInBackground(selected.detail, defaultOption, repoPaths);
 							await refreshJobStatuses();
-							console.log(chalk.green(`  ✓ ${defaultOption.label} launched in background for ${selected.key}`));
 						} catch (error) {
-							const msg = error instanceof Error ? error.message : String(error);
-							console.log(chalk.red(`  Failed to launch: ${msg}`));
+							wLaunchFailed = true;
+							wLaunchError = error instanceof Error ? error.message : String(error);
 						} finally {
 							isAwaitingInput = false;
 							if (process.stdin.isTTY) process.stdin.setRawMode(true);
 						}
 
-						inDetailView = false;
-						await new Promise((r) => setTimeout(r, 1500));
-						redrawList();
+						showPostAgentPrompt = true;
+						postAgentMessage = wLaunchFailed
+							? chalk.red(`Failed to start ${defaultOption.label}: ${wLaunchError}`)
+							: chalk.green(`${defaultOption.label} finished for ${selected.key}. Review output and choose next step.`);
+						renderPostAgentPrompt(selected, postAgentMessage);
 						return;
 					}
 				}

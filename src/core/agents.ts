@@ -33,6 +33,40 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+// ---------------------------------------------------------------------------
+// Background child-process tracking — kill sub-agents when parent exits
+// ---------------------------------------------------------------------------
+const _bgChildPids = new Set<number>();
+
+function trackBackgroundPid(pid: number): void {
+	_bgChildPids.add(pid);
+}
+
+function untrackBackgroundPid(pid: number): void {
+	_bgChildPids.delete(pid);
+}
+
+function killTrackedChildren(): void {
+	for (const pid of _bgChildPids) {
+		try {
+			process.kill(pid, 'SIGTERM');
+		} catch {
+			// Process already exited
+		}
+	}
+	_bgChildPids.clear();
+}
+
+function _onExit(): void {
+	killTrackedChildren();
+}
+
+// Register once — subsequent imports are no-ops because listeners are deduped by reference.
+process.on('exit', _onExit);
+process.on('SIGINT', () => { killTrackedChildren(); process.exit(130); });
+process.on('SIGTERM', () => { killTrackedChildren(); process.exit(143); });
+process.on('SIGHUP', () => { killTrackedChildren(); process.exit(129); });
+
 type MultiRepoBranchStrategy = 'same-branch' | 'separate-branches';
 
 async function promptMultiRepoBranchStrategy(repoPaths: string[], branchHint: string): Promise<MultiRepoBranchStrategy> {
@@ -474,6 +508,8 @@ export async function runCommandBackground(
 	});
 	child.unref();
 
+	if (child.pid) trackBackgroundPid(child.pid);
+
 	const job: JobRecord = {
 		id: ticketKey,
 		ticketKey,
@@ -491,6 +527,7 @@ export async function runCommandBackground(
 	await registerJob(job);
 
 	child.on('error', async () => {
+		if (child.pid) untrackBackgroundPid(child.pid);
 		await logFd.close();
 		await updateJob(ticketKey, {
 			status: 'failed',
@@ -500,6 +537,7 @@ export async function runCommandBackground(
 	});
 
 	child.on('exit', async (code) => {
+		if (child.pid) untrackBackgroundPid(child.pid);
 		await logFd.close();
 		await updateJob(ticketKey, {
 			status: code === 0 ? 'done' : 'failed',
@@ -1243,86 +1281,6 @@ async function dispatchParallelSubAgents(
 	return allResults;
 }
 
-async function dispatchParallelSubAgentsBackground(
-	detail: JiraIssueDetail,
-	agentOption: WorkAgentOption,
-	todoItems: string[],
-	effectivePath: string,
-	jiraUrl: string,
-	contributing: string | null,
-	clarifications: string,
-	axonHint: string,
-	figmaSection: string,
-	referenceRepoPaths: string[],
-): Promise<JobRecord[]> {
-	const maxAgents = getParallelSubAgentCount();
-	const agentCount = Math.min(maxAgents, todoItems.length);
-	const groups = partitionTodoItems(todoItems, agentCount);
-
-	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents in background for ${detail.key} (isolated worktrees)...\n`));
-
-	const parentBranch = detail.key.toUpperCase();
-	const repoPath = effectivePath;
-
-	const jobs: JobRecord[] = [];
-
-	for (let i = 0; i < groups.length; i++) {
-		const subItems = groups[i];
-		let wtPath: string;
-		try {
-			wtPath = await createSubAgentWorktree(repoPath, detail.key, i, parentBranch);
-		} catch (err: unknown) {
-			console.log(chalk.red(`  ✗ Failed to create worktree for sub-agent ${i + 1}: ${err instanceof Error ? err.message : String(err)}`));
-			continue;
-		}
-
-		await writeSubAgentTodo(wtPath, detail.key, i, groups.length, subItems, todoItems);
-
-		const prompt = buildSubTaskPrompt(
-			detail,
-			subItems,
-			todoItems,
-			i,
-			groups.length,
-			contributing ?? undefined,
-			clarifications,
-			axonHint,
-			figmaSection,
-		);
-
-		const ticketTitle = String(detail.fields.summary ?? detail.key);
-		const subTicketKey = `${detail.key}-sub${i + 1}`;
-
-		const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, wtPath, jiraUrl, referenceRepoPaths);
-
-		const job = await runCommandBackground(
-			command,
-			args,
-			toolName,
-			subTicketKey,
-			`${ticketTitle} (sub-agent ${i + 1}/${groups.length})`,
-			[wtPath],
-			wtPath,
-			agentOption.id,
-		);
-
-		jobs.push(job);
-
-		console.log(chalk.gray(`  Sub-agent ${i + 1}/${groups.length} (PID ${job.pid}): ${subItems.length} task(s)`));
-		console.log(chalk.gray(`    Worktree: ${wtPath}`));
-		for (const item of subItems) {
-			console.log(chalk.gray(`    • ${item}`));
-		}
-	}
-
-	if (jobs.length > 0) {
-		console.log(chalk.gray(`\n  ℹ  Background sub-agents will need manual merge after completion:`));
-		console.log(chalk.gray(`     Run: git checkout ${parentBranch} && git merge ${detail.key.toUpperCase()}-sub1 ${detail.key.toUpperCase()}-sub2 ...`));
-	}
-
-	return jobs;
-}
-
 async function generateTodoPlan(
 	detail: JiraIssueDetail,
 	contributing: string,
@@ -1953,7 +1911,7 @@ export async function launchAgentInBackground(
 	const contributing = await readContributing(effectivePath);
 	const axonHint = getAxonPromptHint(effectivePath);
 
-	// --- Parallel sub-agent background path ---
+	// --- Parallel sub-agent foreground path (waits for completion) ---
 	if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
 		let effectiveOption = agentOption;
 		if (agentOption.id === 'ollama-local') {
@@ -1963,7 +1921,7 @@ export async function launchAgentInBackground(
 			effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
 		}
 
-		const subJobs = await dispatchParallelSubAgentsBackground(
+		const subResults = await dispatchParallelSubAgents(
 			detail,
 			effectiveOption,
 			approvedTodoItems,
@@ -1978,12 +1936,31 @@ export async function launchAgentInBackground(
 
 		startAxonWatch(effectivePath);
 
+		const doneCount = subResults.filter((r) => r.status === 'done').length;
+		const failedCount = subResults.filter((r) => r.status === 'failed').length;
+
 		await notifySlackStatus(
-			`ForgePilot started ${subJobs.length} parallel sub-agents in background for ${detail.key}.`,
+			`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.`,
 		);
 
-		// Return the first sub-job as the primary job record
-		return subJobs[0];
+		// Register a summary job so the ticket list shows completion status
+		const summaryJob: JobRecord = {
+			id: detail.key,
+			ticketKey: detail.key,
+			title: ticketTitle,
+			agent: effectiveOption.label,
+			agentOptionId: effectiveOption.id,
+			pid: process.pid,
+			logFile: '',
+			status: failedCount === 0 ? 'done' : 'failed',
+			startedAt: new Date().toISOString(),
+			finishedAt: new Date().toISOString(),
+			repos: paths,
+			effectivePaths: [effectivePath],
+		};
+		await registerJob(summaryJob);
+
+		return summaryJob;
 	}
 
 	// --- Standard single-agent background path ---
