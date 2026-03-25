@@ -30,6 +30,22 @@ function getBaseBranch(): string {
 	return process.env.FORGEPILOT_BASE_BRANCH?.trim() || 'development';
 }
 
+export function extractBaseBranchOverride(text: string): string | null {
+	if (!text) return null;
+	const patterns = [
+		/branch\s+off\s+(?:from|of)\s+[`'"]*([^\s`'",.;:]+)[`'"]*/i,
+		/branch\s+(?:from|off)\s+[`'"]*([^\s`'",.;:]+)[`'"]*/i,
+		/base\s+branch[:\s]+[`'"]*([^\s`'",.;:]+)[`'"]*/i,
+		/use\s+[`'"]*([^\s`'",.;:]+)[`'"]*\s+(?:as\s+)?(?:base|branch)/i,
+		/create\s+(?:a\s+)?branch\s+from\s+[`'"]*([^\s`'",.;:]+)[`'"]*/i,
+	];
+	for (const pattern of patterns) {
+		const match = text.match(pattern);
+		if (match?.[1]) return match[1];
+	}
+	return null;
+}
+
 async function branchExists(repoPath: string, branch: string): Promise<boolean> {
 	try {
 		await gitExec(repoPath, ['rev-parse', '--verify', branch]);
@@ -50,10 +66,10 @@ export function getWorktreePath(repoPath: string, ticketKey: string): string {
 	return path.join(getWorktreeBaseDir(), `${repoName}--${ticketKey.toUpperCase()}`);
 }
 
-export async function createWorktree(repoPath: string, ticketKey: string): Promise<string> {
+export async function createWorktree(repoPath: string, ticketKey: string, baseBranchOverride?: string): Promise<string> {
 	const branchName = ticketKey.toUpperCase();
 	const wtPath = getWorktreePath(repoPath, ticketKey);
-	const baseBranch = getBaseBranch();
+	const baseBranch = baseBranchOverride ?? getBaseBranch();
 
 	await fs.mkdir(path.dirname(wtPath), { recursive: true });
 
@@ -193,13 +209,14 @@ export async function prepareRepoForWork(
 	ticketKey: string,
 	useWorktree = false,
 	detail?: JiraIssueDetail,
+	baseBranchOverride?: string,
 ): Promise<string> {
 	if (useWorktree) {
-		return createWorktree(repoPath, ticketKey);
+		return createWorktree(repoPath, ticketKey, baseBranchOverride);
 	}
 
 	let branchName = ticketKey.toUpperCase();
-	let baseBranch = getBaseBranch();
+	let baseBranch = baseBranchOverride ?? getBaseBranch();
 
 	if (detail) {
 		const bugStrategy = await resolveBugBranchStrategy(repoPath, detail, ticketKey);

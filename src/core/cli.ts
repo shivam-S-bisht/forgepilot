@@ -150,6 +150,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		!showPostAgentPrompt && !showMultiSummary && !inJobList && !inLogViewer && !launchingAgent && !isAwaitingInput;
 
 	statusRefreshInterval = setInterval(async () => {
+		await cleanupStaleJobs();
 		const prevMap = new Map(jobStatusMap);
 		await refreshJobStatuses();
 		let changed = false;

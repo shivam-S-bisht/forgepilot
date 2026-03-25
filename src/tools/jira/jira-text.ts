@@ -542,3 +542,107 @@ export function buildCustomTaskPrompt(
 
 	return sections.join('\n');
 }
+
+export function buildSubTaskPrompt(
+	detail: JiraIssueDetail,
+	subTaskItems: string[],
+	allItems: string[],
+	subAgentIndex: number,
+	totalSubAgents: number,
+	contributing = '',
+	clarifications = '',
+	axonHint = '',
+	figmaSection = '',
+): string {
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+
+	const sections: string[] = [];
+
+	sections.push(
+		'=== ROLE ===',
+		`You are sub-agent ${subAgentIndex + 1} of ${totalSubAgents}, a senior software engineer working on a SUBSET of tasks from a Jira ticket.`,
+		'You write production-quality code that follows existing patterns in the codebase.',
+		`Other sub-agents are working on other tasks from the same ticket in parallel. Coordinate by only modifying files relevant to YOUR assigned tasks.`,
+		'',
+	);
+
+	sections.push(
+		'=== TASK ===',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
+		'',
+		'=== YOUR ASSIGNED TASKS ===',
+		'You are responsible for ONLY these tasks:',
+		'',
+		...subTaskItems.map((item, i) => `${i + 1}. ${item}`),
+		'',
+		'=== FULL PLAN (for context only) ===',
+		'The complete plan for this ticket is below. Tasks marked with [YOURS] are your responsibility.',
+		'All other tasks are handled by other sub-agents — do NOT implement them.',
+		'',
+		...allItems.map((item) => {
+			const isYours = subTaskItems.includes(item);
+			return `- ${isYours ? '[YOURS] ' : '[OTHER] '}${item}`;
+		}),
+		'',
+	);
+
+	sections.push(
+		'=== WORKFLOW ===',
+		'',
+		'1. UNDERSTAND — Read the ticket context below and your assigned tasks.',
+		'',
+		'2. EXPLORE — Examine the relevant parts of the codebase for YOUR tasks only.',
+		'',
+		'3. IMPLEMENT — Work through each of your assigned tasks one at a time:',
+		`   a. Complete the task.`,
+		`   b. Commit the code changes.`,
+		`      Use commit message format: ${detail.key} <concise description of what was done>`,
+		'   c. Move to the next assigned task.',
+		'',
+		'4. VERIFY — After all your tasks are done, run linters, type checks, and tests related to your changes.',
+		'   Fix any errors you introduced.',
+		'',
+	);
+
+	sections.push(
+		'=== TICKET CONTEXT ===',
+		'',
+		'--- Description ---',
+		description || '(no description)',
+		'',
+		'--- Acceptance Criteria ---',
+		ac || '(none specified)',
+		'',
+	);
+
+	sections.push(
+		'=== CONSTRAINTS ===',
+		`- Commit after completing each task. Use the format: ${detail.key} <concise description>. Do NOT push to remote.`,
+		'- Do NOT add Co-authored-by, Signed-off-by, or any other trailers to commit messages.',
+		'- Do NOT delete or rename files unless your specific task explicitly requires it.',
+		'- Match existing code style: indentation, naming, file organization, and patterns.',
+		'- IMPORTANT: Only modify files directly related to YOUR assigned tasks.',
+		'- If you encounter code that another sub-agent is modifying, do NOT touch it — skip with a comment.',
+		'- Handle errors gracefully — no silent failures.',
+		'- If the repo has tests, add or update tests for your changes.',
+		'',
+	);
+
+	if (contributing) {
+		sections.push(
+			'=== CONTRIBUTING GUIDELINES ===',
+			contributing,
+			'=== END CONTRIBUTING GUIDELINES ===',
+			'',
+		);
+	}
+
+	if (figmaSection) sections.push(figmaSection, '');
+	if (axonHint) sections.push(axonHint, '');
+	if (clarifications) sections.push(clarifications, '');
+
+	return sections.join('\n');
+}

@@ -8,16 +8,16 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
-import { buildWorkPrompt, buildCustomTaskPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria } from '../tools/jira/jira-text.js';
+import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
 import { isSlackFullFlowEnabled, notifySlackStatus } from '../tools/slack/slack.js';
 import type { JiraIssueDetail, TicketRunStatus, WorkAgentOption } from './types.js';
-import { getLogFilePath, registerJob, updateJob } from './job-manager.js';
+import { ensureLogDirs, getLogFilePath, registerJob, updateJob } from './job-manager.js';
 import type { JobRecord } from './job-manager.js';
 import { askUser, askUserChoice } from './ask.js';
 import { isVoiceModeActive, printAndSpeak } from '../tools/voice/voice-input.js';
@@ -458,6 +458,7 @@ export async function runCommandBackground(
 	cwd?: string,
 	agentOptionId?: string,
 ): Promise<JobRecord> {
+	await ensureLogDirs();
 	const logFile = getLogFilePath(ticketKey);
 	const logFd = await fsOpen(logFile, 'w');
 
@@ -840,6 +841,219 @@ async function dispatchAgent(
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Parallel sub-agent execution
+// ---------------------------------------------------------------------------
+
+function getParallelSubAgentCount(): number {
+	const envVal = process.env.FORGEPILOT_PARALLEL_AGENTS?.trim();
+	if (envVal) {
+		const n = parseInt(envVal, 10);
+		if (!isNaN(n) && n >= 2 && n <= 10) return n;
+	}
+	return 3;
+}
+
+function partitionTodoItems(items: string[], numGroups: number): string[][] {
+	const groups: string[][] = Array.from({ length: numGroups }, () => []);
+	for (let i = 0; i < items.length; i++) {
+		groups[i % numGroups].push(items[i]);
+	}
+	return groups.filter((g) => g.length > 0);
+}
+
+type SubAgentResult = {
+	index: number;
+	status: 'done' | 'failed';
+	error?: string;
+	pid: number;
+	logFile: string;
+};
+
+async function dispatchParallelSubAgents(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	todoItems: string[],
+	effectivePath: string,
+	jiraUrl: string,
+	contributing: string | null,
+	clarifications: string,
+	axonHint: string,
+	figmaSection: string,
+	referenceRepoPaths: string[],
+): Promise<SubAgentResult[]> {
+	const maxAgents = getParallelSubAgentCount();
+	const agentCount = Math.min(maxAgents, todoItems.length);
+	const groups = partitionTodoItems(todoItems, agentCount);
+
+	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents for ${detail.key}...\n`));
+
+	await ensureLogDirs();
+
+	const subJobs: Array<{
+		index: number;
+		child: ReturnType<typeof spawn>;
+		logFile: string;
+		logFd: Awaited<ReturnType<typeof fsOpen>>;
+		items: string[];
+	}> = [];
+
+	for (let i = 0; i < groups.length; i++) {
+		const subItems = groups[i];
+		const prompt = buildSubTaskPrompt(
+			detail,
+			subItems,
+			todoItems,
+			i,
+			groups.length,
+			contributing ?? undefined,
+			clarifications,
+			axonHint,
+			figmaSection,
+		);
+
+		const { command, args, toolName } = resolveAgentCommand(
+			agentOption,
+			prompt,
+			effectivePath,
+			jiraUrl,
+			referenceRepoPaths,
+		);
+
+		const safeKey = detail.key.replace(/[/\\]/g, '-');
+		const logFile = path.join(path.resolve(import.meta.dirname, '..', '.cache', 'logs'), `${safeKey}-sub${i + 1}-${Date.now()}.log`);
+		const logFd = await fsOpen(logFile, 'w');
+
+		const spawnEnv = agentOption.id === 'ollama-local'
+			? { ...process.env, OLLAMA_API_BASE: getOllamaApiBase() }
+			: undefined;
+
+		const child = spawn(command, args, {
+			stdio: ['ignore', logFd.fd, logFd.fd],
+			cwd: effectivePath,
+			...(spawnEnv ? { env: spawnEnv } : {}),
+		});
+
+		console.log(chalk.gray(`  Sub-agent ${i + 1}/${groups.length} (PID ${child.pid}): ${subItems.length} task(s) → ${toolName}`));
+		for (const item of subItems) {
+			console.log(chalk.gray(`    • ${item}`));
+		}
+
+		subJobs.push({ index: i, child, logFile, logFd, items: subItems });
+	}
+
+	console.log(chalk.gray(`\n  All ${groups.length} sub-agents launched. Waiting for completion...\n`));
+
+	const results = await Promise.allSettled(
+		subJobs.map(
+			({ index, child, logFile, logFd }) =>
+				new Promise<SubAgentResult>((resolve) => {
+					child.on('error', async (err) => {
+						await logFd.close();
+						resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile });
+					});
+					child.on('exit', async (code) => {
+						await logFd.close();
+						if (code === 0) {
+							resolve({ index, status: 'done', pid: child.pid ?? 0, logFile });
+						} else {
+							resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile });
+						}
+					});
+				}),
+		),
+	);
+
+	const finalResults: SubAgentResult[] = results.map((r) =>
+		r.status === 'fulfilled'
+			? r.value
+			: { index: -1, status: 'failed' as const, error: 'Promise rejected', pid: 0, logFile: '' },
+	);
+
+	let doneCount = 0;
+	let failedCount = 0;
+	for (const result of finalResults) {
+		if (result.status === 'done') {
+			doneCount++;
+			console.log(chalk.green(`  ✓ Sub-agent ${result.index + 1} completed (PID ${result.pid})`));
+		} else {
+			failedCount++;
+			console.log(chalk.red(`  ✗ Sub-agent ${result.index + 1} failed: ${result.error}`));
+			console.log(chalk.gray(`    Log: ${result.logFile}`));
+		}
+	}
+
+	console.log('');
+	if (failedCount === 0) {
+		console.log(chalk.bold.green(`  ✓ All ${doneCount} sub-agents completed successfully.`));
+	} else {
+		console.log(chalk.bold.yellow(`  ${doneCount} succeeded, ${failedCount} failed out of ${finalResults.length} sub-agents.`));
+	}
+
+	return finalResults;
+}
+
+async function dispatchParallelSubAgentsBackground(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	todoItems: string[],
+	effectivePath: string,
+	jiraUrl: string,
+	contributing: string | null,
+	clarifications: string,
+	axonHint: string,
+	figmaSection: string,
+	referenceRepoPaths: string[],
+): Promise<JobRecord[]> {
+	const maxAgents = getParallelSubAgentCount();
+	const agentCount = Math.min(maxAgents, todoItems.length);
+	const groups = partitionTodoItems(todoItems, agentCount);
+
+	console.log(chalk.bold.cyan(`\n  Launching ${groups.length} parallel sub-agents in background for ${detail.key}...\n`));
+
+	const jobs: JobRecord[] = [];
+
+	for (let i = 0; i < groups.length; i++) {
+		const subItems = groups[i];
+		const prompt = buildSubTaskPrompt(
+			detail,
+			subItems,
+			todoItems,
+			i,
+			groups.length,
+			contributing ?? undefined,
+			clarifications,
+			axonHint,
+			figmaSection,
+		);
+
+		const ticketTitle = String(detail.fields.summary ?? detail.key);
+		const subTicketKey = `${detail.key}-sub${i + 1}`;
+
+		const { command, args, toolName } = resolveAgentCommand(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+
+		const job = await runCommandBackground(
+			command,
+			args,
+			toolName,
+			subTicketKey,
+			`${ticketTitle} (sub-agent ${i + 1}/${groups.length})`,
+			[effectivePath],
+			effectivePath,
+			agentOption.id,
+		);
+
+		jobs.push(job);
+
+		console.log(chalk.gray(`  Sub-agent ${i + 1}/${groups.length} (PID ${job.pid}): ${subItems.length} task(s)`));
+		for (const item of subItems) {
+			console.log(chalk.gray(`    • ${item}`));
+		}
+	}
+
+	return jobs;
+}
+
 async function generateTodoPlan(
 	detail: JiraIssueDetail,
 	contributing: string,
@@ -902,8 +1116,9 @@ async function reviewTodoPlan(
 	detail: JiraIssueDetail,
 	contributing: string,
 	clarifications: string,
-): Promise<{ approved: string[]; action: 'approve' | 'skip' }> {
+): Promise<{ approved: string[]; action: 'approve' | 'skip'; lastModifications?: string }> {
 	const maxRounds = 5;
+	let lastModifications: string | undefined;
 
 	for (let round = 0; round < maxRounds; round++) {
 		console.log(chalk.bold.cyan(`\n  📋 Proposed plan for ${detail.key}:\n`));
@@ -925,6 +1140,7 @@ async function reviewTodoPlan(
 
 		if (choice.startsWith('__unmatched__:')) {
 			const modifications = choice.slice('__unmatched__:'.length);
+			lastModifications = modifications;
 			console.log(chalk.gray('  Treating your response as a plan modification...'));
 			if (isVoiceModeActive()) {
 				printAndSpeak('Updating the plan with your feedback.');
@@ -939,7 +1155,7 @@ async function reviewTodoPlan(
 		}
 
 		if (choice === 'approve') {
-			return { approved: items, action: 'approve' };
+			return { approved: items, action: 'approve', lastModifications };
 		}
 
 		if (choice === 'skip') {
@@ -949,6 +1165,7 @@ async function reviewTodoPlan(
 		if (choice === 'modify') {
 			const modifications = await askUser(chalk.cyan('  What should be changed? '));
 			if (!modifications) continue;
+			lastModifications = modifications;
 
 			console.log(chalk.gray('  Regenerating plan with your modifications...'));
 			const updated = await generateTodoPlan(detail, contributing, clarifications, modifications);
@@ -972,7 +1189,7 @@ async function reviewTodoPlan(
 		}
 	}
 
-	return { approved: items, action: 'approve' };
+	return { approved: items, action: 'approve', lastModifications };
 }
 
 async function generateCustomTodoPlan(
@@ -1029,8 +1246,9 @@ async function reviewCustomTodoPlan(
 	taskDescription: string,
 	contributing: string,
 	clarifications: string,
-): Promise<{ approved: string[]; action: 'approve' | 'skip' }> {
+): Promise<{ approved: string[]; action: 'approve' | 'skip'; lastModifications?: string }> {
 	const maxRounds = 5;
+	let lastModifications: string | undefined;
 
 	for (let round = 0; round < maxRounds; round++) {
 		console.log(chalk.bold.cyan(`\n  Proposed plan for custom task:\n`));
@@ -1052,6 +1270,7 @@ async function reviewCustomTodoPlan(
 
 		if (choice.startsWith('__unmatched__:')) {
 			const modifications = choice.slice('__unmatched__:'.length);
+			lastModifications = modifications;
 			console.log(chalk.gray('  Treating your response as a plan modification...'));
 			if (isVoiceModeActive()) {
 				printAndSpeak('Updating the plan with your feedback.');
@@ -1066,7 +1285,7 @@ async function reviewCustomTodoPlan(
 		}
 
 		if (choice === 'approve') {
-			return { approved: items, action: 'approve' };
+			return { approved: items, action: 'approve', lastModifications };
 		}
 
 		if (choice === 'skip') {
@@ -1076,6 +1295,7 @@ async function reviewCustomTodoPlan(
 		if (choice === 'modify') {
 			const modifications = await askUser(chalk.cyan('  What should be changed? '));
 			if (!modifications) continue;
+			lastModifications = modifications;
 
 			console.log(chalk.gray('  Regenerating plan with your modifications...'));
 			const updated = await generateCustomTodoPlan(taskDescription, contributing, clarifications, modifications);
@@ -1099,7 +1319,7 @@ async function reviewCustomTodoPlan(
 		}
 	}
 
-	return { approved: items, action: 'approve' };
+	return { approved: items, action: 'approve', lastModifications };
 }
 
 async function askCustomTaskClarifications(
@@ -1195,6 +1415,8 @@ export async function launchAgentForRepos(
 	let preApprovedPlan = false;
 	let approvedTodoItems: string[] = [];
 	let existingPlanContinue = false;
+	let userModifications: string | undefined;
+	let planReviewModifications: string | undefined;
 
 	const existingPlan = await handleExistingPlan(detail.key, paths);
 	if (existingPlan.choice === 'continue') {
@@ -1203,6 +1425,7 @@ export async function launchAgentForRepos(
 		const modifications = existingPlan.choice === 'modify'
 			? await askUser(chalk.cyan('  What should be changed? '))
 			: undefined;
+		userModifications = modifications;
 
 		console.log(chalk.gray('\n  Generating implementation plan...'));
 		const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
@@ -1212,19 +1435,37 @@ export async function launchAgentForRepos(
 				approvedTodoItems = result.approved;
 				preApprovedPlan = true;
 			}
+			planReviewModifications = result.lastModifications;
 		} else {
 			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
 		}
 	}
 
+	const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
+		?? extractBaseBranchOverride(userModifications ?? '')
+		?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
+		?? extractBaseBranchOverride(getDescriptionText(detail))
+		?? extractBaseBranchOverride(commentsText(detail));
+	if (baseBranchOverride) {
+		console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
+	}
+
+	const parallelThreshold = 4;
+	let useParallelSubAgents = false;
+	if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
+		const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
+		useParallelSubAgents = true;
+		console.log(chalk.cyan(`  ⚡ Spawning ${agentCount} parallel agents for ${approvedTodoItems.length} tasks.`));
+	}
+
 	await transitionIssueToInProgress(detail);
-	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).`);
+	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).${useParallelSubAgents ? ' (parallel mode)' : ''}`);
 
 	for (const repoPath of paths) {
 		let axonChild: ReturnType<typeof startAxonWatch> = null;
 		try {
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
-			const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
+			const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail, baseBranchOverride ?? undefined);
 
 			const ticketTitle = String(detail.fields.summary ?? detail.key);
 			const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
@@ -1255,38 +1496,67 @@ export async function launchAgentForRepos(
 			logAxonStatus(effectivePath);
 			axonChild = startAxonWatch(effectivePath);
 
-			let priorAnswers = '';
-			const maxQaRounds = 5;
-			const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
-
-			for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
-				const isResume = resumeMode && qaRound === 0;
-				const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
-
-				await saveCheckpoint(detail.key, {
-					ticketKey: detail.key,
-					agentId: agentOption.id,
-					agentLabel: agentOption.label,
-					repoPath,
+			// --- Parallel sub-agent path ---
+			if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
+				const subResults = await dispatchParallelSubAgents(
+					detail,
+					agentOption,
+					approvedTodoItems,
 					effectivePath,
-					startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
-					lastUpdatedAt: new Date().toISOString(),
-				});
+					jiraUrl,
+					contributing,
+					clarifications,
+					axonHint,
+					figmaSection,
+					referenceRepoPaths,
+				);
 
-				console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ${isResume ? '(resuming from checkpoint) ' : ''}...`));
-				await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+				const failedSubs = subResults.filter((r) => r.status === 'failed');
+				if (failedSubs.length > 0) {
+					console.log(chalk.yellow(`\n  ${failedSubs.length} sub-agent(s) failed. Check logs for details:`));
+					for (const f of failedSubs) {
+						console.log(chalk.gray(`    Sub-agent ${f.index + 1}: ${f.logFile}`));
+					}
+				}
 
-				const questions = await readQuestionsFile(effectivePath, detail.key);
-				if (!questions) break;
+				await notifySlackStatus(
+					`ForgePilot parallel execution for ${detail.key}: ${subResults.filter((r) => r.status === 'done').length}/${subResults.length} sub-agents succeeded.`,
+				);
+			} else {
+				// --- Standard single-agent path ---
+				let priorAnswers = '';
+				const maxQaRounds = 5;
+				const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
 
-				console.log(chalk.yellow(`\n  Agent paused with ${questions.length} question(s). Routing for answers...`));
-				const qaPairs = await routeQuestions(questions, detail.key);
-				await writeAnswersFile(effectivePath, detail.key, qaPairs);
+				for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
+					const isResume = resumeMode && qaRound === 0;
+					const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
 
-				const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
-				priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+					await saveCheckpoint(detail.key, {
+						ticketKey: detail.key,
+						agentId: agentOption.id,
+						agentLabel: agentOption.label,
+						repoPath,
+						effectivePath,
+						startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+						lastUpdatedAt: new Date().toISOString(),
+					});
 
-				await notifySlackStatus(`ForgePilot re-launching ${agentOption.label} for ${detail.key} after answering ${questions.length} question(s).`);
+					console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ${isResume ? '(resuming from checkpoint) ' : ''}...`));
+					await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+
+					const questions = await readQuestionsFile(effectivePath, detail.key);
+					if (!questions) break;
+
+					console.log(chalk.yellow(`\n  Agent paused with ${questions.length} question(s). Routing for answers...`));
+					const qaPairs = await routeQuestions(questions, detail.key);
+					await writeAnswersFile(effectivePath, detail.key, qaPairs);
+
+					const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
+					priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+
+					await notifySlackStatus(`ForgePilot re-launching ${agentOption.label} for ${detail.key} after answering ${questions.length} question(s).`);
+				}
 			}
 
 			await cleanupTodoFiles(effectivePath);
@@ -1325,6 +1595,8 @@ export async function launchAgentInBackground(
 	let preApprovedPlan = false;
 	let approvedTodoItems: string[] = [];
 	let existingPlanContinue = false;
+	let userModifications: string | undefined;
+	let planReviewModifications: string | undefined;
 
 	const existingPlan = await handleExistingPlan(detail.key, paths);
 	if (existingPlan.choice === 'continue') {
@@ -1333,6 +1605,7 @@ export async function launchAgentInBackground(
 		const modifications = existingPlan.choice === 'modify'
 			? await askUser(chalk.cyan('  What should be changed? '))
 			: undefined;
+		userModifications = modifications;
 
 		console.log(chalk.gray('\n  Generating implementation plan...'));
 		const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
@@ -1342,15 +1615,33 @@ export async function launchAgentInBackground(
 				approvedTodoItems = result.approved;
 				preApprovedPlan = true;
 			}
+			planReviewModifications = result.lastModifications;
 		} else {
 			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
 		}
 	}
 
+	const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
+		?? extractBaseBranchOverride(userModifications ?? '')
+		?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
+		?? extractBaseBranchOverride(getDescriptionText(detail))
+		?? extractBaseBranchOverride(commentsText(detail));
+	if (baseBranchOverride) {
+		console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
+	}
+
+	const parallelThreshold = 4;
+	let useParallelSubAgents = false;
+	if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
+		const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
+		useParallelSubAgents = true;
+		console.log(chalk.cyan(`  ⚡ Spawning ${agentCount} parallel background agents for ${approvedTodoItems.length} tasks.`));
+	}
+
 	await transitionIssueToInProgress(detail);
 
 	const repoPath = paths[0];
-	const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
+	const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail, baseBranchOverride ?? undefined);
 	const ticketTitle = String(detail.fields.summary ?? detail.key);
 	const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
 
@@ -1372,6 +1663,41 @@ export async function launchAgentInBackground(
 
 	const contributing = await readContributing(effectivePath);
 	const axonHint = getAxonPromptHint(effectivePath);
+
+	// --- Parallel sub-agent background path ---
+	if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
+		let effectiveOption = agentOption;
+		if (agentOption.id === 'ollama-local') {
+			await ensureOllamaServing();
+			const model = await pickOllamaModel();
+			if (!model) throw new Error('No Ollama model selected.');
+			effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
+		}
+
+		const subJobs = await dispatchParallelSubAgentsBackground(
+			detail,
+			effectiveOption,
+			approvedTodoItems,
+			effectivePath,
+			jiraUrl,
+			contributing,
+			clarifications,
+			axonHint,
+			figmaSection,
+			referenceRepoPaths,
+		);
+
+		startAxonWatch(effectivePath);
+
+		await notifySlackStatus(
+			`ForgePilot started ${subJobs.length} parallel sub-agents in background for ${detail.key}.`,
+		);
+
+		// Return the first sub-job as the primary job record
+		return subJobs[0];
+	}
+
+	// --- Standard single-agent background path ---
 	const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
 	const isResume = resumeMode;
 
@@ -1484,6 +1810,8 @@ export async function launchMultipleTickets(
 		approvedTodoItems: string[];
 		preApprovedPlan: boolean;
 		existingPlanContinue: boolean;
+		baseBranchOverride?: string;
+		useParallelSubAgents: boolean;
 	};
 	const ticketPlans = new Map<string, TicketPlanData>();
 
@@ -1503,6 +1831,8 @@ export async function launchMultipleTickets(
 		let approvedTodoItems: string[] = [];
 		let preApprovedPlan = false;
 		let existingPlanContinue = false;
+		let userModifications: string | undefined;
+		let planReviewModifications: string | undefined;
 
 		console.log(chalk.bold(`\n  ── ${detail.key}: ${detail.fields.summary ?? detail.key} ──`));
 
@@ -1513,6 +1843,7 @@ export async function launchMultipleTickets(
 			const modifications = existingPlan.choice === 'modify'
 				? await askUser(chalk.cyan('  What should be changed? '))
 				: undefined;
+			userModifications = modifications;
 
 			console.log(chalk.gray('  Generating implementation plan...'));
 			const planItems = await generateTodoPlan(detail, contributing ?? '', clarifications, modifications);
@@ -1522,9 +1853,27 @@ export async function launchMultipleTickets(
 					approvedTodoItems = result.approved;
 					preApprovedPlan = true;
 				}
+				planReviewModifications = result.lastModifications;
 			} else {
 				console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
 			}
+		}
+
+		const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
+			?? extractBaseBranchOverride(userModifications ?? '')
+			?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
+			?? extractBaseBranchOverride(getDescriptionText(detail))
+			?? extractBaseBranchOverride(commentsText(detail));
+		if (baseBranchOverride) {
+			console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
+		}
+
+		const parallelThreshold = 4;
+		let useParallelSubAgents = false;
+		if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
+			const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
+			useParallelSubAgents = true;
+			console.log(chalk.cyan(`  ⚡ [${detail.key}] Spawning ${agentCount} parallel agents for ${approvedTodoItems.length} tasks.`));
 		}
 
 		ticketPlans.set(detail.key, {
@@ -1535,6 +1884,8 @@ export async function launchMultipleTickets(
 			approvedTodoItems,
 			preApprovedPlan,
 			existingPlanContinue,
+			baseBranchOverride: baseBranchOverride ?? undefined,
+			useParallelSubAgents,
 		});
 	}
 
@@ -1562,6 +1913,8 @@ export async function launchMultipleTickets(
 		const preApprovedPlan = planData?.preApprovedPlan ?? false;
 		const approvedTodoItems = planData?.approvedTodoItems ?? [];
 		const existingPlanContinue = planData?.existingPlanContinue ?? false;
+		const baseBranchOverride = planData?.baseBranchOverride;
+		const useParallelSubAgents = planData?.useParallelSubAgents ?? false;
 
 		try {
 			const jiraUrl = getJiraBrowseUrl(detail);
@@ -1575,7 +1928,7 @@ export async function launchMultipleTickets(
 				let axonChild: ReturnType<typeof startAxonWatch> = null;
 
 				try {
-					const effectivePath = await prepareRepoForWork(repoPath, effectiveBranchKey, useWorktree, detail);
+					const effectivePath = await prepareRepoForWork(repoPath, effectiveBranchKey, useWorktree, detail, baseBranchOverride);
 					if (useWorktree) worktreePaths.push(effectivePath);
 
 					const ticketTitle = String(detail.fields.summary ?? detail.key);
@@ -1603,34 +1956,51 @@ export async function launchMultipleTickets(
 					const axonHint = getAxonPromptHint(effectivePath);
 					axonChild = startAxonWatch(effectivePath);
 
-					const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
-					let priorAnswers = '';
-					const maxQaRounds = 5;
-
-					for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
-						const isResume = resumeMode && qaRound === 0;
-						const prompt = buildWorkPrompt(detail, contributing ?? undefined, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
-
-						await saveCheckpoint(detail.key, {
-							ticketKey: detail.key,
-							agentId: agentOption.id,
-							agentLabel: agentOption.label,
-							repoPath,
+					// --- Parallel sub-agent path ---
+					if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
+						await dispatchParallelSubAgents(
+							detail,
+							agentOption,
+							approvedTodoItems,
 							effectivePath,
-							startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
-							lastUpdatedAt: new Date().toISOString(),
-						});
+							jiraUrl,
+							contributing,
+							clarifications,
+							axonHint,
+							figmaSection,
+							refRepoPaths,
+						);
+					} else {
+						// --- Standard single-agent path ---
+						const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
+						let priorAnswers = '';
+						const maxQaRounds = 5;
 
-						await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, refRepoPaths);
+						for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
+							const isResume = resumeMode && qaRound === 0;
+							const prompt = buildWorkPrompt(detail, contributing ?? undefined, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
 
-						const questions = await readQuestionsFile(effectivePath, detail.key);
-						if (!questions) break;
+							await saveCheckpoint(detail.key, {
+								ticketKey: detail.key,
+								agentId: agentOption.id,
+								agentLabel: agentOption.label,
+								repoPath,
+								effectivePath,
+								startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+								lastUpdatedAt: new Date().toISOString(),
+							});
 
-						const qaPairs = await routeQuestions(questions, detail.key);
-						await writeAnswersFile(effectivePath, detail.key, qaPairs);
+							await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, refRepoPaths);
 
-						const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
-						priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+							const questions = await readQuestionsFile(effectivePath, detail.key);
+							if (!questions) break;
+
+							const qaPairs = await routeQuestions(questions, detail.key);
+							await writeAnswersFile(effectivePath, detail.key, qaPairs);
+
+							const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
+							priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+						}
 					}
 
 					await cleanupTodoFiles(effectivePath);
@@ -1737,11 +2107,17 @@ export async function launchAgentForCustomTask(
 
 	console.log(chalk.gray('\n  Generating implementation plan...'));
 	const planItems = await generateCustomTodoPlan(taskDescription, contributing ?? '', clarifications);
+	let customBaseBranchOverride: string | null = null;
 	if (planItems) {
 		const result = await reviewCustomTodoPlan(planItems, taskDescription, contributing ?? '', clarifications);
 		if (result.action === 'approve') {
 			approvedTodoItems = result.approved;
 			preApprovedPlan = true;
+		}
+		customBaseBranchOverride = extractBaseBranchOverride(result.lastModifications ?? '')
+			?? extractBaseBranchOverride(approvedTodoItems.join('\n'));
+		if (customBaseBranchOverride) {
+			console.log(chalk.green(`  ✓ Base branch override detected: ${customBaseBranchOverride}`));
 		}
 	} else {
 		console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
@@ -1753,7 +2129,7 @@ export async function launchAgentForCustomTask(
 		let axonChild: ReturnType<typeof startAxonWatch> = null;
 		try {
 			console.log(chalk.bold(`\nPreparing ${repoPath} for ${branchName}...`));
-			const effectivePath = await prepareRepoForWork(repoPath, branchName);
+			const effectivePath = await prepareRepoForWork(repoPath, branchName, false, undefined, customBaseBranchOverride ?? undefined);
 
 			if (preApprovedPlan && approvedTodoItems.length > 0) {
 				const todoPath = todoFilePath(effectivePath, branchName);

@@ -28,13 +28,14 @@ type JobStore = Record<string, JobRecord>;
 
 let jobCache: JobStore | null = null;
 
+const JOB_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
 async function ensureDirs(): Promise<void> {
 	if (!existsSync(CACHE_DIR)) await fs.mkdir(CACHE_DIR, { recursive: true });
 	if (!existsSync(LOGS_DIR)) await fs.mkdir(LOGS_DIR, { recursive: true });
 }
 
 async function loadStore(): Promise<JobStore> {
-	if (jobCache) return jobCache;
 	if (!existsSync(JOBS_FILE)) {
 		jobCache = {};
 		return jobCache;
@@ -121,17 +122,29 @@ export async function removeJob(id: string): Promise<void> {
 export async function cleanupStaleJobs(): Promise<number> {
 	const store = await loadStore();
 	let cleaned = 0;
-	for (const job of Object.values(store)) {
-		if (job.status !== 'running') continue;
-		if (!isProcessAlive(job.pid)) {
+	const now = Date.now();
+	for (const [id, job] of Object.entries(store)) {
+		if (job.status === 'running' && !isProcessAlive(job.pid)) {
 			job.status = 'failed';
 			job.error = 'Process died unexpectedly';
 			job.finishedAt = new Date().toISOString();
 			cleaned++;
+			continue;
+		}
+		if (job.status !== 'running' && job.finishedAt) {
+			const elapsed = now - new Date(job.finishedAt).getTime();
+			if (elapsed > JOB_EXPIRY_MS) {
+				delete store[id];
+				cleaned++;
+			}
 		}
 	}
 	if (cleaned > 0) await persistStore();
 	return cleaned;
+}
+
+export async function ensureLogDirs(): Promise<void> {
+	await ensureDirs();
 }
 
 export function getLogFilePath(ticketKey: string): string {
