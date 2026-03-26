@@ -173,7 +173,7 @@ export async function createSubAgentWorktree(
 export async function mergeSubAgentBranches(
 	repoPath: string,
 	ticketKey: string,
-	subCount: number,
+	subIndices: number[],
 	mainBranch: string,
 ): Promise<{ merged: number; conflicts: string[] }> {
 	await gitExec(repoPath, ['checkout', mainBranch]);
@@ -181,18 +181,23 @@ export async function mergeSubAgentBranches(
 	let merged = 0;
 	const conflicts: string[] = [];
 
-	for (let i = 0; i < subCount; i++) {
-		const subBranch = `${ticketKey.toUpperCase()}-sub${i + 1}`;
-		if (!(await branchExists(repoPath, subBranch))) continue;
+	console.log(chalk.bold.cyan(`\n  Merging ${subIndices.length} sub-agent branches into ${mainBranch}...\n`));
+
+	for (const idx of subIndices) {
+		const subBranch = `${ticketKey.toUpperCase()}-sub${idx + 1}`;
+		if (!(await branchExists(repoPath, subBranch))) {
+			console.log(chalk.gray(`  Sub-agent ${idx + 1}: branch ${subBranch} not found — skipping`));
+			continue;
+		}
 
 		try {
 			const diffOutput = await gitExec(repoPath, ['diff', mainBranch, subBranch, '--stat']);
 			if (!diffOutput.trim()) {
-				console.log(chalk.gray(`  Sub-agent ${i + 1}: no changes to merge`));
+				console.log(chalk.gray(`  Sub-agent ${idx + 1}: no changes to merge`));
 				continue;
 			}
 
-			await gitExec(repoPath, ['merge', subBranch, '--no-edit', '-m', `Merge sub-agent ${i + 1} (${subBranch})`]);
+			await gitExec(repoPath, ['merge', subBranch, '--no-edit', '-m', `Merge sub-agent ${idx + 1} (${subBranch})`]);
 			merged++;
 			console.log(chalk.green(`  ✓ Merged ${subBranch} into ${mainBranch}`));
 		} catch (err: unknown) {
@@ -215,11 +220,11 @@ export async function mergeSubAgentBranches(
 export async function cleanupSubAgentWorktrees(
 	repoPath: string,
 	ticketKey: string,
-	subCount: number,
+	subIndices: number[],
 ): Promise<void> {
-	for (let i = 0; i < subCount; i++) {
-		const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, i);
-		const subBranch = `${ticketKey.toUpperCase()}-sub${i + 1}`;
+	for (const idx of subIndices) {
+		const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, idx);
+		const subBranch = `${ticketKey.toUpperCase()}-sub${idx + 1}`;
 		try {
 			await gitExec(repoPath, ['worktree', 'remove', wtPath, '--force']);
 		} catch { /* ignore */ }
@@ -227,7 +232,7 @@ export async function cleanupSubAgentWorktrees(
 			await gitExec(repoPath, ['branch', '-D', subBranch]);
 		} catch { /* ignore */ }
 	}
-	console.log(chalk.gray(`  Cleaned up ${subCount} sub-agent worktrees/branches`));
+	console.log(chalk.gray(`  Cleaned up ${subIndices.length} sub-agent worktrees/branches`));
 }
 
 type BugBranchStrategy = {

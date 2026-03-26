@@ -985,6 +985,9 @@ type SubAgentResult = {
 	pid: number;
 	logFile: string;
 	worktreePath?: string;
+	startedAt: number;
+	finishedAt: number;
+	taskCount: number;
 };
 
 async function writeSubAgentTodo(
@@ -1094,9 +1097,12 @@ async function executeWave(
 		worktreePath: string;
 	}> = [];
 
+	const subIndices: number[] = [];
+
 	for (let i = 0; i < groups.length; i++) {
 		const subItems = groups[i];
 		const subIdx = waveIndex * 100 + i; // unique index across waves
+		subIndices.push(subIdx);
 		let wtPath: string;
 		try {
 			wtPath = await createSubAgentWorktree(repoPath, detail.key, subIdx, parentBranch);
@@ -1160,23 +1166,25 @@ async function executeWave(
 
 	const finalResults: SubAgentResult[] = [];
 
+	const agentSpawnTime = Date.now();
 	const completionPromises = subJobs.map(
-		({ index, child, logFile, logFd, worktreePath }) =>
+		({ index, child, logFile, logFd, worktreePath, items }) =>
 			new Promise<SubAgentResult>((resolve) => {
+				const spawnedAt = Date.now();
 				child.on('error', async (err) => {
 					const entry = agentEntries.find((e) => e.index === index);
 					if (entry) entry.status = 'failed';
 					await logFd.close();
-					resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile, worktreePath });
+					resolve({ index, status: 'failed', error: err.message, pid: child.pid ?? 0, logFile, worktreePath, startedAt: spawnedAt, finishedAt: Date.now(), taskCount: items.length });
 				});
 				child.on('exit', async (code) => {
 					const entry = agentEntries.find((e) => e.index === index);
 					if (entry) entry.status = code === 0 ? 'done' : 'failed';
 					await logFd.close();
 					if (code === 0) {
-						resolve({ index, status: 'done', pid: child.pid ?? 0, logFile, worktreePath });
+						resolve({ index, status: 'done', pid: child.pid ?? 0, logFile, worktreePath, startedAt: spawnedAt, finishedAt: Date.now(), taskCount: items.length });
 					} else {
-						resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile, worktreePath });
+						resolve({ index, status: 'failed', error: `Exited with code ${code ?? 'unknown'}`, pid: child.pid ?? 0, logFile, worktreePath, startedAt: spawnedAt, finishedAt: Date.now(), taskCount: items.length });
 					}
 				});
 			}),
@@ -1263,7 +1271,7 @@ async function executeWave(
 		if (r.status === 'fulfilled') {
 			finalResults.push(r.value);
 		} else {
-			finalResults.push({ index: -1, status: 'failed' as const, error: 'Promise rejected', pid: 0, logFile: '' });
+			finalResults.push({ index: -1, status: 'failed' as const, error: 'Promise rejected', pid: 0, logFile: '', startedAt: agentSpawnTime, finishedAt: Date.now(), taskCount: 0 });
 		}
 	}
 
@@ -1279,16 +1287,133 @@ async function executeWave(
 	}
 
 	// Merge sub-agent branches back
-	const subCount = groups.length;
-	const { merged, conflicts } = await mergeSubAgentBranches(repoPath, detail.key, subCount, parentBranch);
+	const { merged, conflicts } = await mergeSubAgentBranches(repoPath, detail.key, subIndices, parentBranch);
 
 	// Reconcile todos
 	await reconcileTodosAfterMerge(repoPath, detail.key, groups, subWorktrees);
 
 	// Cleanup worktrees
-	await cleanupSubAgentWorktrees(repoPath, detail.key, subCount);
+	await cleanupSubAgentWorktrees(repoPath, detail.key, subIndices);
 
 	return { results: finalResults, merged, conflicts };
+}
+
+/** Best-effort extraction of premium request / token usage from agent log files. */
+async function parseAgentUsageFromLog(logFile: string): Promise<{ requests?: number; cost?: string }> {
+	try {
+		const content = await fs.readFile(logFile, 'utf8');
+		const result: { requests?: number; cost?: string } = {};
+
+		// Claude Code: "Total cost: $1.23" or "Cost: $0.45"
+		const costMatch = content.match(/(?:total\s+)?cost:\s*\$([0-9.]+)/i);
+		if (costMatch) result.cost = `$${costMatch[1]}`;
+
+		// Aider: "Tokens: 12345 sent, 6789 received" → count as 1 request per send/receive pair
+		const aiderTokens = content.match(/Tokens:\s*([0-9,]+)\s*sent/i);
+		if (aiderTokens) {
+			const allSends = content.match(/Tokens:\s*[0-9,]+\s*sent/gi);
+			if (allSends) result.requests = allSends.length;
+		}
+
+		// Generic: count lines matching common request/turn patterns
+		if (!result.requests) {
+			// Claude: "Assistant" turn markers
+			const assistantTurns = content.match(/^(?:assistant|╭─|> )/gim);
+			// Copilot / generic: "Request \d" or "[request]"
+			const requestLines = content.match(/\brequest(?:s)?[\s:#]\s*(\d+)/gi);
+			if (requestLines && requestLines.length > 0) {
+				const nums = requestLines.map((r) => {
+					const m = r.match(/(\d+)/);
+					return m ? parseInt(m[1], 10) : 0;
+				});
+				result.requests = Math.max(...nums);
+			} else if (assistantTurns) {
+				result.requests = assistantTurns.length;
+			}
+		}
+
+		return result;
+	} catch {
+		return {};
+	}
+}
+
+function formatDuration(ms: number): string {
+	const totalSec = Math.round(ms / 1000);
+	const mins = Math.floor(totalSec / 60);
+	const secs = totalSec % 60;
+	if (mins === 0) return `${secs}s`;
+	return `${mins}m ${secs}s`;
+}
+
+function renderExecutionSummary(
+	ticketKey: string,
+	agentLabel: string,
+	waves: number,
+	results: SubAgentResult[],
+	totalStartTime: number,
+	usageData: Map<number, { requests?: number; cost?: string }>,
+	mergedCount: number,
+	conflictCount: number,
+): void {
+	const totalElapsed = Date.now() - totalStartTime;
+
+	console.log('');
+	console.log(chalk.bold.cyan('  ╔══════════════════════════════════════════════════════════════════╗'));
+	console.log(chalk.bold.cyan('  ║') + chalk.bold('  Execution Summary') + chalk.bold.cyan('                                               ║'));
+	console.log(chalk.bold.cyan('  ╠══════════════════════════════════════════════════════════════════╣'));
+	console.log(chalk.bold.cyan('  ║') + `  Ticket:  ${chalk.white(ticketKey)}`.padEnd(75) + chalk.bold.cyan('║'));
+	console.log(chalk.bold.cyan('  ║') + `  Agent:   ${chalk.white(agentLabel)}`.padEnd(75) + chalk.bold.cyan('║'));
+	console.log(chalk.bold.cyan('  ║') + `  Waves:   ${chalk.white(String(waves))}`.padEnd(75) + chalk.bold.cyan('║'));
+	console.log(chalk.bold.cyan('  ╠══════════════════════════════════════════════════════════════════╣'));
+
+	const doneCount = results.filter((r) => r.status === 'done').length;
+	const failedCount = results.filter((r) => r.status === 'failed').length;
+	let totalRequests = 0;
+	let totalCostNum = 0;
+	let hasAnyUsage = false;
+
+	for (const result of results) {
+		const duration = formatDuration(result.finishedAt - result.startedAt);
+		const statusIcon = result.status === 'done' ? chalk.green('✓') : chalk.red('✗');
+		const statusText = result.status === 'done' ? chalk.green('done') : chalk.red('failed');
+		const usage = usageData.get(result.index);
+		let usageStr = chalk.gray('—');
+		if (usage?.requests) {
+			usageStr = chalk.yellow(`${usage.requests} req`);
+			totalRequests += usage.requests;
+			hasAnyUsage = true;
+		}
+		let costStr = '';
+		if (usage?.cost) {
+			costStr = chalk.gray(` (${usage.cost})`);
+			const num = parseFloat(usage.cost.replace('$', ''));
+			if (!isNaN(num)) totalCostNum += num;
+		}
+
+		const line = `  ${statusIcon} Agent ${result.index + 1}  ${statusText}  ${chalk.gray(duration)}  ${chalk.gray(`${result.taskCount} tasks`)}  ${usageStr}${costStr}`;
+		console.log(chalk.bold.cyan('  ║') + line.padEnd(75) + chalk.bold.cyan('║'));
+	}
+
+	console.log(chalk.bold.cyan('  ╠══════════════════════════════════════════════════════════════════╣'));
+	console.log(chalk.bold.cyan('  ║') + `  Total agents:     ${chalk.bold.white(String(results.length))}`.padEnd(75) + chalk.bold.cyan('║'));
+	console.log(chalk.bold.cyan('  ║') + `  Succeeded:        ${chalk.bold.green(String(doneCount))}`.padEnd(75) + chalk.bold.cyan('║'));
+	if (failedCount > 0) {
+		console.log(chalk.bold.cyan('  ║') + `  Failed:           ${chalk.bold.red(String(failedCount))}`.padEnd(75) + chalk.bold.cyan('║'));
+	}
+	console.log(chalk.bold.cyan('  ║') + `  Merged:           ${chalk.bold.white(String(mergedCount))}`.padEnd(75) + chalk.bold.cyan('║'));
+	if (conflictCount > 0) {
+		console.log(chalk.bold.cyan('  ║') + `  Conflicts:        ${chalk.bold.yellow(String(conflictCount))}`.padEnd(75) + chalk.bold.cyan('║'));
+	}
+	if (hasAnyUsage) {
+		console.log(chalk.bold.cyan('  ║') + `  Premium requests: ${chalk.bold.yellow(String(totalRequests))}`.padEnd(75) + chalk.bold.cyan('║'));
+	}
+	if (totalCostNum > 0) {
+		console.log(chalk.bold.cyan('  ║') + `  Estimated cost:   ${chalk.bold.yellow(`$${totalCostNum.toFixed(2)}`)}`.padEnd(75) + chalk.bold.cyan('║'));
+	}
+	console.log(chalk.bold.cyan('  ║') + `  Total time:       ${chalk.bold.white(formatDuration(totalElapsed))}`.padEnd(75) + chalk.bold.cyan('║'));
+	console.log(chalk.bold.cyan('  ╚══════════════════════════════════════════════════════════════════╝'));
+	console.log('');
 }
 
 async function dispatchParallelSubAgents(
@@ -1319,6 +1444,7 @@ async function dispatchParallelSubAgents(
 	const allResults: SubAgentResult[] = [];
 	let totalMerged = 0;
 	const totalConflicts: string[] = [];
+	const totalStartTime = Date.now();
 
 	// Step 2: Execute wave by wave
 	for (let w = 0; w < waves.length; w++) {
@@ -1365,16 +1491,27 @@ async function dispatchParallelSubAgents(
 		// Next wave will branch off the merged state
 	}
 
-	// Summary
-	const totalDone = allResults.filter((r) => r.status === 'done').length;
-	const totalFailed = allResults.filter((r) => r.status === 'failed').length;
+	// Parse usage data from agent logs
+	const usageData = new Map<number, { requests?: number; cost?: string }>();
+	await Promise.all(allResults.map(async (r) => {
+		if (r.logFile) {
+			const usage = await parseAgentUsageFromLog(r.logFile);
+			usageData.set(r.index, usage);
+		}
+	}));
 
-	console.log('');
-	if (totalFailed === 0 && totalConflicts.length === 0) {
-		console.log(chalk.bold.green(`  ✓ All ${totalDone} agents across ${waves.length} wave(s) completed and merged successfully.`));
-	} else {
-		console.log(chalk.bold.yellow(`  ${totalMerged} merged, ${totalConflicts.length} conflicts, ${totalFailed} failed across ${waves.length} wave(s).`));
-	}
+	// Render execution summary
+	clearScreen();
+	renderExecutionSummary(
+		detail.key,
+		agentOption.label,
+		waves.length,
+		allResults,
+		totalStartTime,
+		usageData,
+		totalMerged,
+		totalConflicts.length,
+	);
 
 	return allResults;
 }
