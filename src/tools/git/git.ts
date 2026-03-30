@@ -228,10 +228,18 @@ export async function cleanupSubAgentWorktrees(
 		try {
 			await gitExec(repoPath, ['worktree', 'remove', wtPath, '--force']);
 		} catch { /* ignore */ }
+		// Remove leftover directory if git worktree remove didn't fully clean up
+		try {
+			await fs.rm(wtPath, { recursive: true, force: true });
+		} catch { /* ignore */ }
 		try {
 			await gitExec(repoPath, ['branch', '-D', subBranch]);
 		} catch { /* ignore */ }
 	}
+	// Prune stale worktree entries
+	try {
+		await gitExec(repoPath, ['worktree', 'prune']);
+	} catch { /* ignore */ }
 	console.log(chalk.gray(`  Cleaned up ${subIndices.length} sub-agent worktrees/branches`));
 }
 
