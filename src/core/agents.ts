@@ -2051,6 +2051,23 @@ export async function launchAgentForRepos(
 
 	const paths = [...repoPaths.values()];
 
+	// Register job early so other terminals see this ticket is active immediately
+	await registerJob({
+		id: detail.key,
+		ticketKey: detail.key,
+		title: String(detail.fields.summary ?? detail.key),
+		agent: agentOption.label,
+		agentOptionId: agentOption.id,
+		pid: process.pid,
+		logFile: '',
+		status: 'running',
+		startedAt: new Date().toISOString(),
+		repos: paths,
+		effectivePaths: [],
+	});
+
+	try {
+
 	const firstRepoContributing = await readContributing(paths[0]);
 	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
 	const clarifications = formatClarifications(preflight);
@@ -2090,6 +2107,7 @@ export async function launchAgentForRepos(
 		if (manualChoice === 'stop') {
 			console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
 			console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
+			await updateJob(detail.key, { status: 'stopped', finishedAt: new Date().toISOString() });
 			return;
 		}
 		console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
@@ -2161,6 +2179,7 @@ export async function launchAgentForRepos(
 		}
 
 		await notifySlackStatus(`ForgePilot completed spike investigation for ${detail.key}.`);
+		await updateJob(detail.key, { status: 'done', finishedAt: new Date().toISOString() });
 		return;
 	}
 
@@ -2330,6 +2349,20 @@ export async function launchAgentForRepos(
 	}
 
 	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
+
+	await updateJob(detail.key, {
+		status: 'done',
+		finishedAt: new Date().toISOString(),
+	});
+
+	} catch (error) {
+		await updateJob(detail.key, {
+			status: 'failed',
+			error: error instanceof Error ? error.message : String(error),
+			finishedAt: new Date().toISOString(),
+		});
+		throw error;
+	}
 }
 
 export async function launchAgentInBackground(
@@ -2338,6 +2371,23 @@ export async function launchAgentInBackground(
 	repoPaths: Map<string, string>,
 ): Promise<JobRecord> {
 	const paths = [...repoPaths.values()];
+
+	// Register job early so other terminals see this ticket is active immediately
+	await registerJob({
+		id: detail.key,
+		ticketKey: detail.key,
+		title: String(detail.fields.summary ?? detail.key),
+		agent: agentOption.label,
+		agentOptionId: agentOption.id,
+		pid: process.pid,
+		logFile: '',
+		status: 'running',
+		startedAt: new Date().toISOString(),
+		repos: paths,
+		effectivePaths: [],
+	});
+
+	try {
 
 	const firstRepoContributing = await readContributing(paths[0]);
 	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
@@ -2596,6 +2646,15 @@ export async function launchAgentInBackground(
 	await notifySlackStatus(`ForgePilot started ${effectiveOption.label} for ${detail.key} in background (PID ${job.pid}).`);
 
 	return job;
+
+	} catch (error) {
+		await updateJob(detail.key, {
+			status: 'failed',
+			error: error instanceof Error ? error.message : String(error),
+			finishedAt: new Date().toISOString(),
+		});
+		throw error;
+	}
 }
 
 export function resolveAgentOptionById(id: string): WorkAgentOption | undefined {
