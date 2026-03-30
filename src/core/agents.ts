@@ -9,8 +9,8 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees } from '../tools/git/git.js';
-import type { OpenPR, ReviewComment } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, analyzeSubAgentWork } from '../tools/git/git.js';
+import type { OpenPR, ReviewComment, SubAgentBranchAnalysis, EnhancedMergeResult } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
 import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
@@ -1077,7 +1077,7 @@ async function executeWave(
 	axonHint: string,
 	figmaSection: string,
 	referenceRepoPaths: string[],
-): Promise<{ results: SubAgentResult[]; merged: number; conflicts: string[] }> {
+): Promise<{ results: SubAgentResult[]; merged: number; conflicts: string[]; branchAnalyses: SubAgentBranchAnalysis[] }> {
 	const maxAgents = getParallelSubAgentCount();
 	const agentCount = Math.min(maxAgents, waveTasks.length);
 	const groups = partitionTodoItems(waveTasks, agentCount);
@@ -1151,7 +1151,7 @@ async function executeWave(
 	}
 
 	if (subJobs.length === 0) {
-		return { results: [], merged: 0, conflicts: [] };
+		return { results: [], merged: 0, conflicts: [], branchAnalyses: [] };
 	}
 
 	// ── Interactive sub-agent monitor ──────────────────────────────────
@@ -1286,8 +1286,8 @@ async function executeWave(
 		}
 	}
 
-	// Merge sub-agent branches back
-	const { merged, conflicts } = await mergeSubAgentBranches(repoPath, detail.key, subIndices, parentBranch);
+	// Merge sub-agent branches back (includes analysis, stashing, and smart merge)
+	const { merged, conflicts, branchAnalyses } = await mergeSubAgentBranches(repoPath, detail.key, subIndices, parentBranch);
 
 	// Reconcile todos
 	await reconcileTodosAfterMerge(repoPath, detail.key, groups, subWorktrees);
@@ -1295,7 +1295,7 @@ async function executeWave(
 	// Cleanup worktrees
 	await cleanupSubAgentWorktrees(repoPath, detail.key, subIndices);
 
-	return { results: finalResults, merged, conflicts };
+	return { results: finalResults, merged, conflicts, branchAnalyses };
 }
 
 /** Best-effort extraction of premium request / token usage from agent log files. */
@@ -1416,6 +1416,127 @@ function renderExecutionSummary(
 	console.log('');
 }
 
+function displayPostMergeAnalysis(
+	analyses: SubAgentBranchAnalysis[],
+	conflicts: string[],
+): void {
+	const withUncommitted = analyses.filter((a) => a.hasUncommittedChanges);
+	const withUnmergedCommits = analyses.filter((a) => a.exists && !a.alreadyMerged && a.aheadCommits.length > 0 && conflicts.includes(a.subBranch));
+	const alreadyMerged = analyses.filter((a) => a.alreadyMerged);
+
+	if (alreadyMerged.length > 0) {
+		console.log(chalk.gray(`  ${alreadyMerged.length} branch(es) were already merged — skipped.`));
+	}
+
+	if (withUnmergedCommits.length > 0) {
+		console.log(chalk.yellow(`\n  ⚠ ${withUnmergedCommits.length} branch(es) have unmerged commits (conflicts prevented merge):`));
+		for (const a of withUnmergedCommits) {
+			console.log(chalk.yellow(`\n    ${a.subBranch} — ${a.aheadCommits.length} unmerged commit(s):`));
+			for (const c of a.aheadCommits.slice(0, 10)) {
+				console.log(chalk.gray(`      ${c.hash} ${c.message}`));
+			}
+			if (a.aheadCommits.length > 10) {
+				console.log(chalk.gray(`      ... and ${a.aheadCommits.length - 10} more`));
+			}
+		}
+	}
+
+	if (withUncommitted.length > 0) {
+		console.log(chalk.yellow(`\n  ⚠ ${withUncommitted.length} sub-agent(s) left uncommitted changes in their worktrees:`));
+		for (const a of withUncommitted) {
+			console.log(chalk.yellow(`    ${a.subBranch}:`));
+			for (const f of a.uncommittedFiles.slice(0, 8)) {
+				console.log(chalk.gray(`      ${f}`));
+			}
+			if (a.uncommittedFiles.length > 8) {
+				console.log(chalk.gray(`      ... and ${a.uncommittedFiles.length - 8} more`));
+			}
+		}
+		console.log(chalk.gray('\n  These changes were not committed by the agent and were not merged.'));
+	}
+}
+
+async function promptRetryIncomplete(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	conflicts: string[],
+	failedResults: SubAgentResult[],
+	analyses: SubAgentBranchAnalysis[],
+	effectivePath: string,
+	jiraUrl: string,
+	contributing: string | null,
+	clarifications: string,
+	axonHint: string,
+	figmaSection: string,
+	referenceRepoPaths: string[],
+): Promise<boolean> {
+	const hasConflicts = conflicts.length > 0;
+	const hasFailures = failedResults.length > 0;
+	const hasUncommitted = analyses.some((a) => a.hasUncommittedChanges);
+
+	if (!hasConflicts && !hasFailures && !hasUncommitted) return false;
+
+	const issues: string[] = [];
+	if (hasConflicts) issues.push(`${conflicts.length} merge conflict(s)`);
+	if (hasFailures) issues.push(`${failedResults.length} failed agent(s)`);
+	if (hasUncommitted) issues.push('uncommitted changes in worktrees');
+
+	console.log(chalk.yellow(`\n  Issues detected: ${issues.join(', ')}`));
+
+	const choice = await askUserChoice(
+		'How would you like to proceed?',
+		[
+			{ id: 'retry', label: 'Re-run ForgePilot on the incomplete/failed work' },
+			{ id: 'manual', label: 'I\'ll handle it manually' },
+			{ id: 'skip', label: 'Skip — continue without retrying' },
+		],
+	);
+
+	if (choice === 'retry') {
+		// Collect incomplete TODO items from the main branch todo file
+		const safeKey = detail.key.toUpperCase().replace(/[/\\]/g, '-');
+		const todoPath = path.join(effectivePath, `.forgepilot-todos-${safeKey}.md`);
+		let incompleteTasks: string[] = [];
+		try {
+			const content = await fs.readFile(todoPath, 'utf8');
+			for (const line of content.split('\n')) {
+				const unchecked = line.match(/^-\s*\[\s\]\s+(.+)/);
+				if (unchecked) incompleteTasks.push(unchecked[1].trim());
+			}
+		} catch { /* no todo file */ }
+
+		if (incompleteTasks.length === 0) {
+			console.log(chalk.gray('  No incomplete tasks found in the todo file. Running full retry.'));
+			incompleteTasks = analyses
+				.filter((a) => conflicts.includes(a.subBranch) || !a.exists)
+				.flatMap((a) => a.aheadCommits.map((c) => c.message))
+				.filter(Boolean);
+		}
+
+		if (incompleteTasks.length === 0) {
+			console.log(chalk.yellow('  Could not determine incomplete tasks. Please re-run manually.'));
+			return false;
+		}
+
+		console.log(chalk.cyan(`\n  Re-running ${incompleteTasks.length} incomplete task(s)...\n`));
+		await dispatchParallelSubAgents(
+			detail,
+			agentOption,
+			incompleteTasks,
+			effectivePath,
+			jiraUrl,
+			contributing,
+			clarifications,
+			axonHint,
+			figmaSection,
+			referenceRepoPaths,
+		);
+		return true;
+	}
+
+	return false;
+}
+
 async function dispatchParallelSubAgents(
 	detail: JiraIssueDetail,
 	agentOption: WorkAgentOption,
@@ -1427,7 +1548,7 @@ async function dispatchParallelSubAgents(
 	axonHint: string,
 	figmaSection: string,
 	referenceRepoPaths: string[],
-): Promise<SubAgentResult[]> {
+): Promise<{ results: SubAgentResult[]; branchAnalyses: SubAgentBranchAnalysis[]; totalMerged: number; totalConflicts: string[] }> {
 	// Step 1: Classify tasks into dependency waves
 	console.log(chalk.gray('  Analyzing task dependencies...'));
 	const waves = await classifyTaskDependencies(todoItems);
@@ -1442,6 +1563,7 @@ async function dispatchParallelSubAgents(
 	}
 
 	const allResults: SubAgentResult[] = [];
+	const allBranchAnalyses: SubAgentBranchAnalysis[] = [];
 	let totalMerged = 0;
 	const totalConflicts: string[] = [];
 	const totalStartTime = Date.now();
@@ -1457,7 +1579,7 @@ async function dispatchParallelSubAgents(
 			console.log(chalk.gray(`    Single task — running one agent.`));
 		}
 
-		const { results, merged, conflicts } = await executeWave(
+		const { results, merged, conflicts, branchAnalyses } = await executeWave(
 			w,
 			waves.length,
 			wave.tasks,
@@ -1474,6 +1596,7 @@ async function dispatchParallelSubAgents(
 		);
 
 		allResults.push(...results);
+		allBranchAnalyses.push(...branchAnalyses);
 		totalMerged += merged;
 		totalConflicts.push(...conflicts);
 
@@ -1513,7 +1636,10 @@ async function dispatchParallelSubAgents(
 		totalConflicts.length,
 	);
 
-	return allResults;
+	// Display detailed branch analysis
+	displayPostMergeAnalysis(allBranchAnalyses, totalConflicts);
+
+	return { results: allResults, branchAnalyses: allBranchAnalyses, totalMerged, totalConflicts };
 }
 
 async function generateTodoPlan(
@@ -2272,7 +2398,7 @@ export async function launchAgentForRepos(
 
 			// --- Parallel sub-agent path ---
 			if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
-				const subResults = await dispatchParallelSubAgents(
+				const { results: subResults, branchAnalyses, totalConflicts } = await dispatchParallelSubAgents(
 					detail,
 					agentOption,
 					approvedTodoItems,
@@ -2292,6 +2418,22 @@ export async function launchAgentForRepos(
 						console.log(chalk.gray(`    Sub-agent ${f.index + 1}: ${f.logFile}`));
 					}
 				}
+
+				// Ask user about retrying incomplete work (foreground only)
+				await promptRetryIncomplete(
+					detail,
+					agentOption,
+					totalConflicts,
+					failedSubs,
+					branchAnalyses,
+					effectivePath,
+					jiraUrl,
+					contributing,
+					clarifications,
+					axonHint,
+					figmaSection,
+					referenceRepoPaths,
+				);
 
 				await notifySlackStatus(
 					`ForgePilot parallel execution for ${detail.key}: ${subResults.filter((r) => r.status === 'done').length}/${subResults.length} sub-agents succeeded.`,
@@ -2562,7 +2704,7 @@ export async function launchAgentInBackground(
 			effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
 		}
 
-		const subResults = await dispatchParallelSubAgents(
+		const { results: subResults, totalConflicts, branchAnalyses } = await dispatchParallelSubAgents(
 			detail,
 			effectiveOption,
 			approvedTodoItems,
@@ -2579,9 +2721,10 @@ export async function launchAgentInBackground(
 
 		const doneCount = subResults.filter((r) => r.status === 'done').length;
 		const failedCount = subResults.filter((r) => r.status === 'failed').length;
+		const hasIncomplete = totalConflicts.length > 0 || failedCount > 0 || branchAnalyses.some((a) => a.hasUncommittedChanges);
 
 		await notifySlackStatus(
-			`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.`,
+			`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.${hasIncomplete ? ' Some work may be incomplete — review needed.' : ''}`,
 		);
 
 		// Register a summary job so the ticket list shows completion status

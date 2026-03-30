@@ -170,12 +170,121 @@ export async function createSubAgentWorktree(
 	return wtPath;
 }
 
+export type SubAgentBranchAnalysis = {
+	subBranch: string;
+	index: number;
+	exists: boolean;
+	aheadCommits: Array<{ hash: string; message: string }>;
+	hasUncommittedChanges: boolean;
+	uncommittedFiles: string[];
+	alreadyMerged: boolean;
+};
+
+export type EnhancedMergeResult = {
+	merged: number;
+	conflicts: string[];
+	branchAnalyses: SubAgentBranchAnalysis[];
+	mainBranchStashed: boolean;
+};
+
+export async function analyzeSubAgentWork(
+	repoPath: string,
+	ticketKey: string,
+	subIndices: number[],
+	mainBranch: string,
+): Promise<SubAgentBranchAnalysis[]> {
+	const analyses: SubAgentBranchAnalysis[] = [];
+
+	for (const idx of subIndices) {
+		const subBranch = `${ticketKey.toUpperCase()}-sub${idx + 1}`;
+		const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, idx);
+
+		const analysis: SubAgentBranchAnalysis = {
+			subBranch,
+			index: idx,
+			exists: false,
+			aheadCommits: [],
+			hasUncommittedChanges: false,
+			uncommittedFiles: [],
+			alreadyMerged: false,
+		};
+
+		if (!(await branchExists(repoPath, subBranch))) {
+			analyses.push(analysis);
+			continue;
+		}
+
+		analysis.exists = true;
+
+		// Check commits ahead of main branch
+		try {
+			const logOutput = await gitExec(repoPath, ['log', `${mainBranch}..${subBranch}`, '--oneline', '--no-decorate']);
+			if (logOutput.trim()) {
+				analysis.aheadCommits = logOutput.trim().split('\n').map((line) => {
+					const spaceIdx = line.indexOf(' ');
+					return {
+						hash: spaceIdx > 0 ? line.substring(0, spaceIdx) : line,
+						message: spaceIdx > 0 ? line.substring(spaceIdx + 1) : '',
+					};
+				});
+			} else {
+				// No commits ahead — already merged or no changes
+				analysis.alreadyMerged = true;
+			}
+		} catch {
+			// If log fails, treat as needing investigation
+		}
+
+		// Check for uncommitted changes in the worktree
+		if (existsSync(wtPath)) {
+			try {
+				const statusOutput = await gitExec(wtPath, ['status', '--porcelain']);
+				if (statusOutput.trim()) {
+					analysis.hasUncommittedChanges = true;
+					analysis.uncommittedFiles = statusOutput.trim().split('\n').map((l) => l.trim());
+				}
+			} catch { /* worktree may not be accessible */ }
+		}
+
+		analyses.push(analysis);
+	}
+
+	return analyses;
+}
+
 export async function mergeSubAgentBranches(
 	repoPath: string,
 	ticketKey: string,
 	subIndices: number[],
 	mainBranch: string,
-): Promise<{ merged: number; conflicts: string[] }> {
+): Promise<EnhancedMergeResult> {
+	// Step 1: Analyze all sub-agent branches before any merge operations
+	const branchAnalyses = await analyzeSubAgentWork(repoPath, ticketKey, subIndices, mainBranch);
+
+	// Step 2: Remove untracked forgepilot temp files that would block git merge
+	try {
+		const entries = await fs.readdir(repoPath);
+		for (const entry of entries) {
+			if (
+				(entry.startsWith('.forgepilot-todos-') || entry.startsWith('.forgepilot-questions-') || entry.startsWith('.forgepilot-answers-'))
+				&& entry.endsWith('.md')
+			) {
+				await fs.rm(path.join(repoPath, entry), { force: true });
+			}
+		}
+	} catch { /* best-effort cleanup */ }
+
+	// Step 3: Stash any remaining uncommitted changes on the main branch
+	let mainBranchStashed = false;
+	try {
+		const statusOutput = await gitExec(repoPath, ['status', '--porcelain']);
+		if (statusOutput.trim()) {
+			await gitExec(repoPath, ['stash', 'push', '-u', '-m', `forgepilot-pre-merge-${ticketKey}`]);
+			mainBranchStashed = true;
+			console.log(chalk.gray('  Stashed uncommitted changes on main branch before merge'));
+		}
+	} catch { /* ignore — may fail if nothing to stash */ }
+
 	await gitExec(repoPath, ['checkout', mainBranch]);
 
 	let merged = 0;
@@ -183,38 +292,69 @@ export async function mergeSubAgentBranches(
 
 	console.log(chalk.bold.cyan(`\n  Merging ${subIndices.length} sub-agent branches into ${mainBranch}...\n`));
 
-	for (const idx of subIndices) {
-		const subBranch = `${ticketKey.toUpperCase()}-sub${idx + 1}`;
-		if (!(await branchExists(repoPath, subBranch))) {
-			console.log(chalk.gray(`  Sub-agent ${idx + 1}: branch ${subBranch} not found — skipping`));
+	for (const analysis of branchAnalyses) {
+		if (!analysis.exists) {
+			console.log(chalk.gray(`  ${analysis.subBranch}: branch not found — skipping`));
 			continue;
 		}
 
-		try {
-			const diffOutput = await gitExec(repoPath, ['diff', mainBranch, subBranch, '--stat']);
-			if (!diffOutput.trim()) {
-				console.log(chalk.gray(`  Sub-agent ${idx + 1}: no changes to merge`));
-				continue;
-			}
+		if (analysis.alreadyMerged) {
+			console.log(chalk.gray(`  ${analysis.subBranch}: already merged — skipping`));
+			continue;
+		}
 
-			await gitExec(repoPath, ['merge', subBranch, '--no-edit', '-m', `Merge sub-agent ${idx + 1} (${subBranch})`]);
+		if (analysis.aheadCommits.length === 0) {
+			console.log(chalk.gray(`  ${analysis.subBranch}: no new commits — skipping`));
+			continue;
+		}
+
+		console.log(chalk.gray(`  ${analysis.subBranch}: ${analysis.aheadCommits.length} commit(s) to merge`));
+
+		try {
+			await gitExec(repoPath, ['merge', analysis.subBranch, '--no-edit', '-m', `Merge sub-agent (${analysis.subBranch})`]);
 			merged++;
-			console.log(chalk.green(`  ✓ Merged ${subBranch} into ${mainBranch}`));
+			console.log(chalk.green(`  ✓ Merged ${analysis.subBranch} into ${mainBranch}`));
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			if (msg.includes('CONFLICT') || msg.includes('conflict')) {
-				console.log(chalk.yellow(`  ⚠ Merge conflict from ${subBranch} — aborting this merge`));
+				console.log(chalk.yellow(`  ⚠ Merge conflict from ${analysis.subBranch} — aborting this merge`));
 				try { await gitExec(repoPath, ['merge', '--abort']); } catch { /* ignore */ }
-				conflicts.push(subBranch);
+				conflicts.push(analysis.subBranch);
 			} else {
-				console.log(chalk.red(`  ✗ Failed to merge ${subBranch}: ${msg}`));
+				console.log(chalk.red(`  ✗ Failed to merge ${analysis.subBranch}: ${msg}`));
 				try { await gitExec(repoPath, ['merge', '--abort']); } catch { /* ignore */ }
-				conflicts.push(subBranch);
+				conflicts.push(analysis.subBranch);
 			}
 		}
 	}
 
-	return { merged, conflicts };
+	// Step 5: Restore stashed changes
+	if (mainBranchStashed) {
+		try {
+			await gitExec(repoPath, ['stash', 'pop']);
+			console.log(chalk.gray('  Restored stashed changes on main branch'));
+		} catch {
+			console.log(chalk.yellow('  ⚠ Could not auto-restore stashed changes. Run `git stash pop` manually.'));
+		}
+	}
+
+	// Report uncommitted changes in sub-agent worktrees
+	const withUncommitted = branchAnalyses.filter((a) => a.hasUncommittedChanges);
+	if (withUncommitted.length > 0) {
+		console.log(chalk.yellow(`\n  ⚠ ${withUncommitted.length} sub-agent(s) have uncommitted changes in their worktrees:`));
+		for (const a of withUncommitted) {
+			const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, a.index);
+			console.log(chalk.yellow(`    ${a.subBranch} → ${wtPath}`));
+			for (const f of a.uncommittedFiles.slice(0, 5)) {
+				console.log(chalk.gray(`      ${f}`));
+			}
+			if (a.uncommittedFiles.length > 5) {
+				console.log(chalk.gray(`      ... and ${a.uncommittedFiles.length - 5} more`));
+			}
+		}
+	}
+
+	return { merged, conflicts, branchAnalyses, mainBranchStashed };
 }
 
 export async function cleanupSubAgentWorktrees(
