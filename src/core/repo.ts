@@ -19,6 +19,15 @@ import { askUser, askUserChoice } from './ask.js';
 import { isVoiceModeActive } from '../tools/voice/voice-input.js';
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_REPO_SCAN_DEPTH = 3;
+
+function getRepoScanDepth(): number {
+	const raw = process.env.FORGEPILOT_REPO_SCAN_DEPTH?.trim();
+	if (!raw) return DEFAULT_REPO_SCAN_DEPTH;
+	const parsed = parseInt(raw, 10);
+	if (Number.isNaN(parsed)) return DEFAULT_REPO_SCAN_DEPTH;
+	return Math.max(1, Math.min(parsed, 10));
+}
 
 export function normalizeRepoUrl(raw: string): string {
 	if (!raw) return '';
@@ -70,15 +79,15 @@ export function extractTicketRepoLabels(detail: JiraIssueDetail): RepoLabel[] {
 	return [...byNorm.values()];
 }
 
-export async function scanLocalRepos(rootDir: string, depth = 0): Promise<string[]> {
-	if (depth > 3) return [];
+export async function scanLocalRepos(rootDir: string, depth = 0, maxDepth = DEFAULT_REPO_SCAN_DEPTH): Promise<string[]> {
+	if (depth > maxDepth) return [];
 	const entries = await fs.readdir(rootDir, { withFileTypes: true });
 	const repos: string[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name === '.git') continue;
 		const full = path.join(rootDir, entry.name);
 		if (existsSync(path.join(full, '.git'))) repos.push(full);
-		else repos.push(...(await scanLocalRepos(full, depth + 1)));
+		else repos.push(...(await scanLocalRepos(full, depth + 1, maxDepth)));
 	}
 	return repos;
 }
@@ -357,8 +366,9 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		console.log(chalk.gray(`Using cached root directory: ${rootDir}`));
 	}
 
-	console.log(chalk.gray(`\nScanning repos under ${rootDir} ...`));
-	const localRepoPaths = await scanLocalRepos(rootDir);
+	const scanDepth = getRepoScanDepth();
+	console.log(chalk.gray(`\nScanning repos under ${rootDir} (depth ${scanDepth}) ...`));
+	const localRepoPaths = await scanLocalRepos(rootDir, 0, scanDepth);
 	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
 
 	// --- Step 3: Try matching repo URLs (description, AC, Jira smart links / dev fields) ---
@@ -537,7 +547,8 @@ export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map
 	const ticketRepos = extractTicketRepoLabels(detail);
 	if (!ticketRepos.length) return repoMap;
 
-	const localRepoPaths = await scanLocalRepos(rootDir);
+	const scanDepth = getRepoScanDepth();
+	const localRepoPaths = await scanLocalRepos(rootDir, 0, scanDepth);
 	const remoteIndex = new Map<string, string>();
 	for (const localPath of localRepoPaths) {
 		const remotes = await getRemoteUrls(localPath);
@@ -564,7 +575,8 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 	}
 
 	console.log(chalk.gray(`  Scanning repos under ${rootDir}...`));
-	const localRepoPaths = await scanLocalRepos(rootDir);
+	const scanDepth = getRepoScanDepth();
+	const localRepoPaths = await scanLocalRepos(rootDir, 0, scanDepth);
 	console.log(chalk.gray(`  Found ${localRepoPaths.length} local git repo(s).`));
 
 	if (ticketRepos.length) {

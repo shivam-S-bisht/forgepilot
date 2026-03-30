@@ -12,7 +12,7 @@ import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
 import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
-import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText } from '../tools/jira/jira-text.js';
+import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
@@ -1573,6 +1573,182 @@ async function generateTodoPlan(
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Ticket mode classification — code vs plan (spike) vs manual
+// ---------------------------------------------------------------------------
+
+type TicketMode =
+	| { mode: 'code' }
+	| { mode: 'plan'; reason: string }
+	| { mode: 'manual'; reason: string; indicators: string[] };
+
+function classifyTicketMode(detail: JiraIssueDetail): TicketMode {
+	const issueTypeName = getIssueTypeName(detail).toLowerCase();
+	const title = (detail.fields.summary ?? '').toLowerCase();
+	const description = getDescriptionText(detail).toLowerCase();
+	const combined = `${title} ${description}`;
+
+	// Spike / research / investigation / epic → plan mode
+	const planTypePatterns = ['spike', 'research', 'investigation', 'poc', 'proof of concept', 'discovery', 'epic'];
+	for (const pat of planTypePatterns) {
+		if (issueTypeName.includes(pat)) {
+			const verb = issueTypeName.includes('epic') ? 'high-level planning' : 'research/investigation';
+			return { mode: 'plan', reason: `Issue type is "${getIssueTypeName(detail)}" — this is a ${verb} task` };
+		}
+	}
+
+	// Manual-change issue types
+	const manualTypePatterns = ['db change', 'database change', 'db migration', 'infra change', 'infrastructure', 'deployment', 'config change'];
+	for (const pat of manualTypePatterns) {
+		if (issueTypeName.includes(pat)) {
+			return { mode: 'manual', reason: `Issue type is "${getIssueTypeName(detail)}"`, indicators: [getIssueTypeName(detail)] };
+		}
+	}
+
+	// Detect manual-change signals in ticket content
+	const manualChecks: Array<{ pattern: RegExp; label: string }> = [
+		{ pattern: /\b(alter\s+table|create\s+table|drop\s+table|add\s+column|drop\s+column|rename\s+table|create\s+index|drop\s+index)\b/i, label: 'Database DDL changes' },
+		{ pattern: /\b(database\s+migration|db\s+migration|schema\s+change|schema\s+migration|run\s+migration)\b/i, label: 'Database migration' },
+		{ pattern: /\b(terraform|helm\s+chart|kubernetes\s+manifest|k8s\s+(config|deploy)|infra\s+change)\b/i, label: 'Infrastructure change' },
+		{ pattern: /\b(manually\s+(run|execute|deploy|configure)|run\s+the\s+following\s+(command|script)|execute\s+the\s+following)\b/i, label: 'Manual execution required' },
+		{ pattern: /\b(add|update|change|set|delete|remove)\s+(environment\s+variable|env\s+var|secret|vault\s+secret)\b/i, label: 'Environment variable or secret changes' },
+		{ pattern: /\b(data\s+backfill|backfill\s+data|data\s+migration|migrate\s+data|seed\s+data)\b/i, label: 'Data migration or backfill' },
+		{ pattern: /\b(feature\s+flag|feature\s+toggle)\s+(enable|disable|turn\s+on|turn\s+off)\b/i, label: 'Feature flag change' },
+	];
+
+	const indicators: string[] = [];
+	for (const { pattern, label } of manualChecks) {
+		if (pattern.test(combined)) {
+			indicators.push(label);
+		}
+	}
+
+	if (indicators.length > 0) {
+		return {
+			mode: 'manual',
+			reason: 'Detected manual changes required based on ticket content',
+			indicators,
+		};
+	}
+
+	return { mode: 'code' };
+}
+
+async function generateManualSteps(detail: JiraIssueDetail): Promise<string[]> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+
+	const prompt = [
+		'You are a senior software engineer analyzing a Jira ticket that requires manual (non-code) changes.',
+		'Extract or generate the specific manual steps a human operator must perform.',
+		'',
+		'Output requirements:',
+		'- Return ONLY a numbered list of steps.',
+		'- Format: "1. Step description"',
+		'- Be specific: include SQL commands, CLI commands, or config snippets where relevant.',
+		'- Include warnings, prerequisites, and rollback notes where appropriate.',
+		'- Max 25 steps.',
+		'- No prose, no headings — only the numbered list.',
+		'',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
+		'',
+		`Description:\n${description.slice(0, 6000)}`,
+		'',
+		`Acceptance Criteria:\n${ac.slice(0, 4000)}`,
+	].join('\n');
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else {
+			return [];
+		}
+
+		return stdout
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => /^\d+\./.test(line))
+			.map((line) => line.replace(/^\d+\.\s*/, '').trim())
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
+}
+
+async function generateSpikeResearchPlan(detail: JiraIssueDetail, contributing: string, clarifications: string): Promise<string[]> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+
+	const prompt = [
+		'You are a senior software engineer planning a technical spike / research investigation.',
+		'Generate a list of research areas or investigation tasks to complete this spike.',
+		'',
+		'Output requirements:',
+		'- Return ONLY a markdown checklist (no explanation, no JSON, no code fences).',
+		'- Format: "- [ ] Research area or investigation task"',
+		'- Focus on: understanding current state, exploring options, identifying risks, making recommendations.',
+		'- Max 12 items.',
+		'',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
+		'',
+		`Description:\n${description.slice(0, 6000)}`,
+		'',
+		`Acceptance Criteria / Goals:\n${ac.slice(0, 4000)}`,
+		contributing ? `\nContributing Guidelines:\n${contributing.slice(0, 2000)}` : '',
+		clarifications ? `\nUser Clarifications:\n${clarifications.slice(0, 2000)}` : '',
+	].filter(Boolean).join('\n');
+
+	try {
+		let stdout = '';
+		if (preflightAgent === 'copilot') {
+			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else if (preflightAgent === 'cursor') {
+			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+		} else {
+			return [];
+		}
+
+		return stdout
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.startsWith('- [ ]'))
+			.map((line) => line.replace(/^- \[ \]\s*/, '').trim())
+			.filter(Boolean);
+	} catch {
+		return [];
+	}
+}
+
+function displayManualSteps(detail: JiraIssueDetail, reason: string, indicators: string[], steps: string[]): void {
+	const issueType = getIssueTypeName(detail) || 'Ticket';
+	console.log(chalk.bold.yellow(`\n  ⚠  Manual Changes Required — ${detail.key}`));
+	console.log(chalk.yellow(`  This ${issueType} requires manual changes that cannot be automated.\n`));
+	console.log(chalk.gray(`  Reason: ${reason}`));
+	if (indicators.length > 0) {
+		console.log(chalk.gray(`  Detected: ${indicators.join(', ')}`));
+	}
+	console.log('');
+
+	if (steps.length > 0) {
+		console.log(chalk.bold.white('  Steps to perform manually:\n'));
+		for (let i = 0; i < steps.length; i++) {
+			console.log(chalk.white(`  ${i + 1}. ${steps[i]}`));
+		}
+	} else {
+		console.log(chalk.gray('  Review the ticket description for the specific manual steps required.'));
+	}
+	console.log('');
+}
+
 const APPROVAL_PHRASES = /^\s*(looks\s*good|(?:it(?:'s|\s+is)\s+)?(?:good|fine|ok(?:ay)?|perfect|great|nice|correct|lgtm|approve|no\s*change[s]?|nothing|none|nope|nah|all\s*good|that(?:'s|\s+is)\s*(?:good|fine|it|all)))\s*[.!]?\s*$/i;
 
 function looksLikeApproval(text: string): boolean {
@@ -1894,6 +2070,103 @@ export async function launchAgentForRepos(
 	const figmaSection = await fetchFigmaDesignContext(detail);
 	const jiraUrl = getJiraBrowseUrl(detail);
 
+	// ── Ticket mode classification ────────────────────────────────────────
+	const ticketMode = classifyTicketMode(detail);
+	const issueTypeLabel = getIssueTypeName(detail) || 'Ticket';
+
+	if (ticketMode.mode === 'manual') {
+		console.log(chalk.gray('\n  Analyzing ticket for manual steps...'));
+		const steps = await generateManualSteps(detail);
+		displayManualSteps(detail, ticketMode.reason, ticketMode.indicators, steps);
+
+		const manualChoice = await askUserChoice(
+			`${detail.key} requires manual changes. How would you like to proceed?`,
+			[
+				{ id: 'stop', label: 'Stop here — I will perform the manual steps myself' },
+				{ id: 'proceed', label: 'Proceed anyway — have the agent attempt this ticket' },
+			],
+		);
+
+		if (manualChoice === 'stop') {
+			console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
+			console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
+			return;
+		}
+		console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
+	}
+
+	if (ticketMode.mode === 'plan') {
+		console.log(chalk.bold.cyan(`\n  📋 Plan Mode — ${issueTypeLabel}: ${detail.key}`));
+		console.log(chalk.gray(`  ${ticketMode.reason}\n`));
+
+		console.log(chalk.gray('  Generating research/investigation plan...'));
+		let researchItems = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', clarifications);
+
+		if (researchItems.length === 0) {
+			console.log(chalk.yellow('  Could not auto-generate research plan. Agent will explore freely.'));
+		}
+
+		let planApproved = false;
+		const maxPlanRounds = 5;
+		for (let round = 0; round < maxPlanRounds && !planApproved; round++) {
+			console.log(chalk.bold.cyan(`\n  Research plan for ${detail.key}:\n`));
+			if (researchItems.length > 0) {
+				for (let i = 0; i < researchItems.length; i++) {
+					console.log(chalk.white(`  ${i + 1}. ${researchItems[i]}`));
+				}
+			} else {
+				console.log(chalk.gray('  (no specific research items — agent will explore freely)'));
+			}
+			console.log('');
+
+			const planChoice = await askUserChoice('What would you like to do?', [
+				{ id: 'approve', label: 'Looks good — start the spike investigation' },
+				{ id: 'modify', label: 'Modify the research plan' },
+				{ id: 'skip', label: 'Skip plan review — let the agent decide' },
+			]);
+
+			if (planChoice === 'approve' || planChoice === 'skip') {
+				planApproved = true;
+			} else if (planChoice === 'modify') {
+				const mod = await askUser(chalk.cyan('  What should be changed? '));
+				if (mod) {
+					const updated = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', `${clarifications}\n${mod}`);
+					if (updated.length > 0) researchItems = updated;
+					else console.log(chalk.yellow('  Could not regenerate. Keeping current plan.'));
+				}
+			}
+		}
+
+		await transitionIssueToInProgress(detail);
+		await notifySlackStatus(`ForgePilot started ${agentOption.label} for spike ${detail.key}.`);
+
+		for (const repoPath of paths) {
+			let axonChild: ReturnType<typeof startAxonWatch> = null;
+			try {
+				console.log(chalk.bold(`\nPreparing ${repoPath} for spike ${detail.key}...`));
+				const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
+				const repoContributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
+				logAxonStatus(effectivePath);
+				axonChild = startAxonWatch(effectivePath);
+				const spikePrompt = buildSpikePrompt(detail, repoContributing ?? '', clarifications, researchItems);
+				console.log(chalk.bold(`\nRunning ${agentOption.label} in spike/plan mode in ${effectivePath}...`));
+				await dispatchAgent(agentOption, spikePrompt, effectivePath, jiraUrl, referenceRepoPaths);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				await notifySlackStatus(`ForgePilot error for spike ${detail.key}: ${message}.`);
+				throw error;
+			} finally {
+				stopAxonWatch(axonChild);
+			}
+		}
+
+		await notifySlackStatus(`ForgePilot completed spike investigation for ${detail.key}.`);
+		return;
+	}
+
+	// ── Code mode: fall through to normal plan/implement flow ─────────────
+	void issueTypeLabel; // used in manual/plan branches above
+
 	let preApprovedPlan = false;
 	let approvedTodoItems: string[] = [];
 	let existingPlanContinue = false;
@@ -2074,17 +2347,100 @@ export async function launchAgentInBackground(
 	const figmaSection = await fetchFigmaDesignContext(detail);
 	const jiraUrl = getJiraBrowseUrl(detail);
 
+	// ── Ticket mode classification ────────────────────────────────────────
+	const bgTicketMode = classifyTicketMode(detail);
+	const bgIssueTypeLabel = getIssueTypeName(detail) || 'Ticket';
+
+	if (bgTicketMode.mode === 'manual') {
+		console.log(chalk.gray('\n  Analyzing ticket for manual steps...'));
+		const steps = await generateManualSteps(detail);
+		displayManualSteps(detail, bgTicketMode.reason, bgTicketMode.indicators, steps);
+
+		const manualChoice = await askUserChoice(
+			`${detail.key} requires manual changes. How would you like to proceed?`,
+			[
+				{ id: 'stop', label: 'Stop here — I will perform the manual steps myself' },
+				{ id: 'proceed', label: 'Proceed anyway — have the agent attempt this ticket' },
+			],
+		);
+
+		if (manualChoice === 'stop') {
+			console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
+			console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
+			throw new Error(`Manual changes required for ${detail.key} — stopped by user.`);
+		}
+		console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
+	}
+
+	if (bgTicketMode.mode === 'plan') {
+		console.log(chalk.bold.cyan(`\n  📋 Plan Mode — ${bgIssueTypeLabel}: ${detail.key}`));
+		console.log(chalk.gray(`  ${bgTicketMode.reason}\n`));
+
+		console.log(chalk.gray('  Generating research/investigation plan...'));
+		let researchItems = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', clarifications);
+		if (researchItems.length === 0) {
+			console.log(chalk.yellow('  Could not auto-generate research plan. Agent will explore freely.'));
+		}
+
+		let planApproved = false;
+		const maxPlanRounds = 5;
+		for (let round = 0; round < maxPlanRounds && !planApproved; round++) {
+			console.log(chalk.bold.cyan(`\n  Research plan for ${detail.key}:\n`));
+			if (researchItems.length > 0) {
+				for (let i = 0; i < researchItems.length; i++) {
+					console.log(chalk.white(`  ${i + 1}. ${researchItems[i]}`));
+				}
+			} else {
+				console.log(chalk.gray('  (no research items — agent will explore freely)'));
+			}
+			console.log('');
+
+			const planChoice = await askUserChoice('What would you like to do?', [
+				{ id: 'approve', label: 'Looks good — start the spike investigation' },
+				{ id: 'modify', label: 'Modify the research plan' },
+				{ id: 'skip', label: 'Skip plan review — let the agent decide' },
+			]);
+
+			if (planChoice === 'approve' || planChoice === 'skip') {
+				planApproved = true;
+			} else if (planChoice === 'modify') {
+				const mod = await askUser(chalk.cyan('  What should be changed? '));
+				if (mod) {
+					const updated = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', `${clarifications}\n${mod}`);
+					if (updated.length > 0) researchItems = updated;
+					else console.log(chalk.yellow('  Could not regenerate. Keeping current plan.'));
+				}
+			}
+		}
+
+		await transitionIssueToInProgress(detail);
+
+		const repoPath = paths[0];
+		const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
+		const repoContributing = await readContributing(effectivePath);
+		const spikePrompt = buildSpikePrompt(detail, repoContributing ?? '', clarifications, researchItems);
+
+		const { command, args, toolName } = resolveAgentCommand(agentOption, spikePrompt, effectivePath, jiraUrl, referenceRepoPaths);
+		const job = await runCommandBackground(command, args, toolName, detail.key, String(detail.fields.summary ?? detail.key), paths, effectivePath, agentOption.id);
+
+		await notifySlackStatus(`ForgePilot queued ${agentOption.label} for spike ${detail.key} (background).`);
+		return job;
+	}
+
+	// ── Code mode: fall through to normal plan/implement flow ─────────────
+	void bgIssueTypeLabel; // used in manual/plan branches above
+
 	let preApprovedPlan = false;
 	let approvedTodoItems: string[] = [];
 	let existingPlanContinue = false;
 	let userModifications: string | undefined;
 	let planReviewModifications: string | undefined;
 
-	const existingPlan = await handleExistingPlan(detail.key, paths);
-	if (existingPlan.choice === 'continue') {
+	const existingPlanBg = await handleExistingPlan(detail.key, paths);
+	if (existingPlanBg.choice === 'continue') {
 		existingPlanContinue = true;
 	} else {
-		const modifications = existingPlan.choice === 'modify'
+		const modifications = existingPlanBg.choice === 'modify'
 			? await askUser(chalk.cyan('  What should be changed? '))
 			: undefined;
 		userModifications = modifications;

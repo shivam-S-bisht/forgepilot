@@ -217,6 +217,11 @@ export function colorStatus(status: string): string {
 	return status;
 }
 
+export function getIssueTypeName(detail: JiraIssueDetail): string {
+	const issuetype = detail.fields.issuetype as { name?: string } | undefined;
+	return issuetype?.name?.trim() ?? '';
+}
+
 export function getJiraBrowseUrl(detail: JiraIssueDetail): string {
 	if (detail.self) {
 		try {
@@ -644,6 +649,126 @@ export function buildSubTaskPrompt(
 	if (figmaSection) sections.push(figmaSection, '');
 	if (axonHint) sections.push(axonHint, '');
 	if (clarifications) sections.push(clarifications, '');
+
+	return sections.join('\n');
+}
+
+export function buildSpikePrompt(
+	detail: JiraIssueDetail,
+	contributing = '',
+	clarifications = '',
+	researchItems: string[] = [],
+): string {
+	const title = detail.fields.summary ?? '(no title)';
+	const status = detail.fields.status?.name ?? 'Unknown';
+	const issueType = getIssueTypeName(detail) || 'Spike';
+	const description = getDescriptionText(detail);
+	const ac = getAcceptanceCriteria(detail);
+	const comments = commentsText(detail);
+	const outputFile = `.forgepilot-spike-${detail.key}.md`;
+
+	const sections: string[] = [];
+
+	sections.push(
+		'=== ROLE ===',
+		`You are a senior software engineer conducting a technical ${issueType.toLowerCase()} / research investigation.`,
+		'Your goal is to research, explore, and document findings — NOT to write production code.',
+		'Do not create branches, make commits, or modify source files.',
+		'',
+	);
+
+	sections.push(
+		'=== TASK ===',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
+		`Status: ${status}`,
+		`Type: ${issueType}`,
+		'',
+	);
+
+	const focusStep = researchItems.length > 0
+		? [
+			'4. FOCUS — Address each of the following specific research areas:',
+			'',
+			...researchItems.map((item, i) => `   ${i + 1}. ${item}`),
+			'',
+		  ]
+		: [
+			'4. FOCUS — Thoroughly address all aspects of the spike objectives.',
+			'',
+		  ];
+
+	sections.push(
+		'=== WORKFLOW ===',
+		'',
+		'1. UNDERSTAND — Read the full spike description and objectives carefully.',
+		'',
+		'2. RESEARCH — Explore the codebase, read relevant code, and investigate the topic.',
+		'   Check existing implementations, dependencies, and patterns.',
+		'',
+		'3. DOCUMENT — Create a file called ' + outputFile + ' with your findings using this structure:',
+		'',
+		`   # ${detail.key}: ${title}`,
+		'',
+		'   ## Summary',
+		'   One-paragraph summary of all findings.',
+		'',
+		'   ## Current State',
+		'   What exists today in the codebase/system relevant to this spike.',
+		'',
+		'   ## Findings',
+		'   Detailed research findings, observations, and analysis.',
+		'',
+		'   ## Risks & Considerations',
+		'   Technical risks, trade-offs, and dependencies discovered.',
+		'',
+		'   ## Recommendations',
+		'   What you recommend based on your investigation.',
+		'',
+		'   ## Proposed Implementation Tasks (optional)',
+		'   If applicable, a breakdown of concrete next steps for follow-up stories/tasks.',
+		'',
+		...focusStep,
+		'5. REVIEW — Verify your findings are accurate, well-organized, and cover all objectives.',
+		'',
+	);
+
+	sections.push(
+		'=== SPIKE OBJECTIVES ===',
+		'',
+		'--- Description ---',
+		description || '(no description)',
+		'',
+		'--- Acceptance Criteria / Goals ---',
+		ac || '(none specified)',
+		'',
+	);
+
+	if (comments && comments !== 'No comments') {
+		sections.push('--- Comments ---', comments, '');
+	}
+
+	sections.push(
+		'=== CONSTRAINTS ===',
+		'- Do NOT write production code or modify source files.',
+		'- Do NOT create git branches or make commits.',
+		'- Output ONLY the findings document (' + outputFile + ').',
+		'- Be thorough but concise — focus on what is actionable and useful.',
+		'',
+	);
+
+	if (contributing) {
+		sections.push(
+			'=== CONTRIBUTING GUIDELINES ===',
+			contributing,
+			'=== END CONTRIBUTING GUIDELINES ===',
+			'',
+		);
+	}
+
+	if (clarifications) {
+		sections.push('=== USER CLARIFICATIONS ===', clarifications, '');
+	}
 
 	return sections.join('\n');
 }
