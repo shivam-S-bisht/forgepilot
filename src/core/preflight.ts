@@ -280,7 +280,7 @@ async function analyzeTicketWithAi(
 		}
 
 		if (preflightAgent === 'cursor') {
-			const { stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 10 * 1024 * 1024 });
+			const { stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 10 * 1024 * 1024 });
 			return normalizeConcerns(extractJsonPayload(stdout)).slice(0, 6);
 		}
 	} catch {
@@ -341,7 +341,7 @@ async function clarifyWithAi(concern: PreflightConcern, userQuestion: string): P
 			return stdout.trim() || null;
 		}
 		if (preflightAgent === 'cursor') {
-			const { stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 });
+			const { stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 });
 			return stdout.trim() || null;
 		}
 	} catch {

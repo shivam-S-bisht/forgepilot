@@ -313,7 +313,7 @@ async function detectRepoWithAi(
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 15_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '--prompt', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 15_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 15_000 }));
 		} else {
 			return [];
 		}

@@ -937,7 +937,7 @@ async function classifyTaskDependencies(todoItems: string[]): Promise<TaskWave[]
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 30_000 }));
 		} else {
 			return [{ wave: 1, tasks: todoItems }];
 		}
@@ -1555,7 +1555,7 @@ async function generateTodoPlan(
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else {
 			return null;
 		}
@@ -1665,7 +1665,7 @@ async function generateManualSteps(detail: JiraIssueDetail): Promise<string[]> {
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else {
 			return [];
 		}
@@ -1712,7 +1712,7 @@ async function generateSpikeResearchPlan(detail: JiraIssueDetail, contributing: 
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else {
 			return [];
 		}
@@ -1874,7 +1874,7 @@ async function generateCustomTodoPlan(
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else {
 			return null;
 		}
@@ -2007,7 +2007,7 @@ async function askCustomTaskClarifications(
 		if (preflightAgent === 'copilot') {
 			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
+			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
 		} else {
 			return '';
 		}
