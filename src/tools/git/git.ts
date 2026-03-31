@@ -261,27 +261,33 @@ export async function mergeSubAgentBranches(
 	// Step 1: Analyze all sub-agent branches before any merge operations
 	const branchAnalyses = await analyzeSubAgentWork(repoPath, ticketKey, subIndices, mainBranch);
 
-	// Step 2: Remove untracked forgepilot temp files that would block git merge
-	try {
-		const entries = await fs.readdir(repoPath);
-		for (const entry of entries) {
-			if (
-				(entry.startsWith('.forgepilot-todos-') || entry.startsWith('.forgepilot-questions-') || entry.startsWith('.forgepilot-answers-'))
-				&& entry.endsWith('.md')
-			) {
-				await fs.rm(path.join(repoPath, entry), { force: true });
-			}
-		}
-	} catch { /* best-effort cleanup */ }
-
-	// Step 3: Stash any remaining uncommitted changes on the main branch
+	// Step 2: Stash ALL uncommitted + untracked changes (including .forgepilot md files)
+	// instead of deleting them — this preserves any in-progress main branch state
 	let mainBranchStashed = false;
 	try {
 		const statusOutput = await gitExec(repoPath, ['status', '--porcelain']);
-		if (statusOutput.trim()) {
+		// Also check for untracked forgepilot files that would block merge
+		const entries = await fs.readdir(repoPath).catch(() => [] as string[]);
+		const hasForgepilotFiles = entries.some((e) =>
+			(e.startsWith('.forgepilot-todos-') || e.startsWith('.forgepilot-questions-') || e.startsWith('.forgepilot-answers-'))
+			&& e.endsWith('.md'),
+		);
+
+		if (statusOutput.trim() || hasForgepilotFiles) {
+			// Stage any untracked forgepilot files so they get included in the stash
+			if (hasForgepilotFiles) {
+				for (const entry of entries) {
+					if (
+						(entry.startsWith('.forgepilot-todos-') || entry.startsWith('.forgepilot-questions-') || entry.startsWith('.forgepilot-answers-'))
+						&& entry.endsWith('.md')
+					) {
+						try { await gitExec(repoPath, ['add', entry]); } catch { /* ignore */ }
+					}
+				}
+			}
 			await gitExec(repoPath, ['stash', 'push', '-u', '-m', `forgepilot-pre-merge-${ticketKey}`]);
 			mainBranchStashed = true;
-			console.log(chalk.gray('  Stashed uncommitted changes on main branch before merge'));
+			console.log(chalk.gray('  Stashed main branch changes (including forgepilot temp files) before merge'));
 		}
 	} catch { /* ignore — may fail if nothing to stash */ }
 
@@ -328,13 +334,17 @@ export async function mergeSubAgentBranches(
 		}
 	}
 
-	// Step 5: Restore stashed changes
+	// Step 5: Restore stashed changes (but NOT forgepilot temp files — they get reconciled separately)
 	if (mainBranchStashed) {
 		try {
 			await gitExec(repoPath, ['stash', 'pop']);
 			console.log(chalk.gray('  Restored stashed changes on main branch'));
 		} catch {
-			console.log(chalk.yellow('  ⚠ Could not auto-restore stashed changes. Run `git stash pop` manually.'));
+			// Pop may conflict if merge brought in the same files.
+			// Drop the stash — the merged state is the authoritative one.
+			console.log(chalk.yellow('  ⚠ Stash pop conflict — dropping stash (merged state takes priority).'));
+			try { await gitExec(repoPath, ['checkout', '--', '.']); } catch { /* ignore */ }
+			try { await gitExec(repoPath, ['stash', 'drop']); } catch { /* ignore */ }
 		}
 	}
 
@@ -357,14 +367,56 @@ export async function mergeSubAgentBranches(
 	return { merged, conflicts, branchAnalyses, mainBranchStashed };
 }
 
+const FORGEPILOT_MD_PATTERNS = ['.forgepilot-todos-', '.forgepilot-questions-', '.forgepilot-answers-'];
+
+function isForgepilotTempFile(filename: string): boolean {
+	return FORGEPILOT_MD_PATTERNS.some((p) => filename.startsWith(p)) && filename.endsWith('.md');
+}
+
+/** Check if a sub-agent worktree's md files were recently modified (agent may still be finishing). */
+async function isWorktreeRecentlyActive(wtPath: string, ticketKey: string, thresholdMs = 15_000): Promise<boolean> {
+	const safeKey = ticketKey.toUpperCase().replace(/[/\\]/g, '-');
+	const mdFiles = [
+		path.join(wtPath, `.forgepilot-todos-${safeKey}.md`),
+		path.join(wtPath, `.forgepilot-questions-${safeKey}.md`),
+		path.join(wtPath, `.forgepilot-answers-${safeKey}.md`),
+	];
+
+	for (const mdFile of mdFiles) {
+		try {
+			const stat = await fs.stat(mdFile);
+			const age = Date.now() - stat.mtimeMs;
+			if (age < thresholdMs) return true;
+		} catch { /* file doesn't exist — fine */ }
+	}
+	return false;
+}
+
 export async function cleanupSubAgentWorktrees(
 	repoPath: string,
 	ticketKey: string,
 	subIndices: number[],
 ): Promise<void> {
+	const skipped: number[] = [];
+
 	for (const idx of subIndices) {
 		const wtPath = getSubAgentWorktreePath(repoPath, ticketKey, idx);
 		const subBranch = `${ticketKey.toUpperCase()}-sub${idx + 1}`;
+
+		// Check if the worktree md files were recently modified — agent may still be flushing
+		if (existsSync(wtPath) && await isWorktreeRecentlyActive(wtPath, ticketKey)) {
+			console.log(chalk.yellow(`  ⚠ Worktree ${subBranch}: md files recently modified — waiting...`));
+			// Wait briefly for the agent to finish flushing
+			await new Promise((r) => setTimeout(r, 5000));
+
+			// Re-check after wait
+			if (await isWorktreeRecentlyActive(wtPath, ticketKey, 5000)) {
+				console.log(chalk.yellow(`  ⚠ Worktree ${subBranch}: still active — skipping cleanup`));
+				skipped.push(idx);
+				continue;
+			}
+		}
+
 		try {
 			await gitExec(repoPath, ['worktree', 'remove', wtPath, '--force']);
 		} catch { /* ignore */ }
@@ -380,7 +432,32 @@ export async function cleanupSubAgentWorktrees(
 	try {
 		await gitExec(repoPath, ['worktree', 'prune']);
 	} catch { /* ignore */ }
-	console.log(chalk.gray(`  Cleaned up ${subIndices.length} sub-agent worktrees/branches`));
+
+	const cleaned = subIndices.length - skipped.length;
+	if (skipped.length > 0) {
+		console.log(chalk.yellow(`  Cleaned ${cleaned} worktrees, skipped ${skipped.length} (still active)`));
+	} else {
+		console.log(chalk.gray(`  Cleaned up ${cleaned} sub-agent worktrees/branches`));
+	}
+}
+
+/** Remove all .forgepilot-todos/questions/answers md files from a repo root. Call at the very end. */
+export async function cleanupForgepilotTempFiles(repoPath: string): Promise<void> {
+	try {
+		const entries = await fs.readdir(repoPath);
+		let removed = 0;
+		for (const entry of entries) {
+			if (isForgepilotTempFile(entry)) {
+				await fs.rm(path.join(repoPath, entry), { force: true });
+				removed++;
+			}
+		}
+		// Also unstage them from git index if tracked
+		if (removed > 0) {
+			try { await gitExec(repoPath, ['rm', '--cached', '--ignore-unmatch', '.forgepilot-*.md']); } catch { /* ignore */ }
+			console.log(chalk.gray(`  Cleaned up ${removed} forgepilot temp file(s) from ${path.basename(repoPath)}`));
+		}
+	} catch { /* best-effort */ }
 }
 
 type BugBranchStrategy = {

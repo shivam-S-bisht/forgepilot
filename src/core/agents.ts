@@ -9,7 +9,7 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, analyzeSubAgentWork } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, analyzeSubAgentWork, cleanupForgepilotTempFiles } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment, SubAgentBranchAnalysis, EnhancedMergeResult } from '../tools/git/git.js';
 import { transitionIssueToInProgress } from '../tools/jira/jira.js';
 import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
@@ -1638,6 +1638,10 @@ async function dispatchParallelSubAgents(
 
 	// Display detailed branch analysis
 	displayPostMergeAnalysis(allBranchAnalyses, totalConflicts);
+
+	// Final cleanup: remove all forgepilot temp files from the root repo
+	// This is the LAST step — only after all waves, merges, and reconciliation are done
+	await cleanupForgepilotTempFiles(effectivePath);
 
 	return { results: allResults, branchAnalyses: allBranchAnalyses, totalMerged, totalConflicts };
 }
