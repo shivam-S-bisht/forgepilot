@@ -134,3 +134,22 @@ export async function transitionIssueToInProgress(detail: JiraIssueDetail): Prom
 		body: JSON.stringify({ transition: { id: inProgressTransition.id } }),
 	});
 }
+
+export async function addJiraComment(issueKey: string, text: string): Promise<void> {
+	await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, {
+		method: 'POST',
+		body: JSON.stringify({
+			body: {
+				type: 'doc',
+				version: 1,
+				content: [
+					{
+						type: 'codeBlock',
+						attrs: { language: 'text' },
+						content: [{ type: 'text', text }],
+					},
+				],
+			},
+		}),
+	});
+}

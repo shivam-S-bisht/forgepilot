@@ -9,9 +9,9 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, analyzeSubAgentWork, cleanupForgepilotTempFiles } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, analyzeSubAgentWork, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment, SubAgentBranchAnalysis, EnhancedMergeResult } from '../tools/git/git.js';
-import { transitionIssueToInProgress } from '../tools/jira/jira.js';
+import { transitionIssueToInProgress, addJiraComment } from '../tools/jira/jira.js';
 import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
@@ -542,6 +542,9 @@ export async function runCommandBackground(
 	child.on('exit', async (code) => {
 		if (child.pid) untrackBackgroundPid(child.pid);
 		await logFd.close();
+		if (code === 0 && cwd) {
+			await publishCompletionSummary(ticketKey, [cwd]);
+		}
 		await updateJob(ticketKey, {
 			status: code === 0 ? 'done' : 'failed',
 			error: code !== 0 ? `Exited with code ${code ?? 'unknown'}` : undefined,
@@ -2167,6 +2170,31 @@ async function askCustomTaskClarifications(
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Publish a work summary when a ticket completes (Slack + Jira comment)
+// ---------------------------------------------------------------------------
+
+async function publishCompletionSummary(
+	ticketKey: string,
+	effectivePaths: string[],
+): Promise<void> {
+	try {
+		const summaries = await Promise.all(
+			effectivePaths.map((p) => generateCompletionSummary(p, ticketKey)),
+		);
+		const nonEmpty = summaries.filter((s) => s.commitCount > 0);
+		if (nonEmpty.length === 0) return;
+
+		const text = formatCompletionSummaryText(nonEmpty);
+		await notifySlackStatus(text);
+		await addJiraComment(ticketKey, text).catch(() => {
+			// Jira comment is best-effort; don't fail the completion for it.
+		});
+	} catch {
+		// Summary publishing is best-effort.
+	}
+}
+
 export async function launchAgentForRepos(
 	detail: JiraIssueDetail,
 	agentOption: WorkAgentOption,
@@ -2308,6 +2336,7 @@ export async function launchAgentForRepos(
 			}
 		}
 
+		await publishCompletionSummary(detail.key, paths);
 		await notifySlackStatus(`ForgePilot completed spike investigation for ${detail.key}.`);
 		await updateJob(detail.key, { status: 'done', finishedAt: new Date().toISOString() });
 		return;
@@ -2364,6 +2393,8 @@ export async function launchAgentForRepos(
 
 	await transitionIssueToInProgress(detail);
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).${useParallelSubAgents ? ' (parallel mode)' : ''}`);
+
+	const completedEffectivePaths: string[] = [];
 
 	for (const repoPath of paths) {
 		let axonChild: ReturnType<typeof startAxonWatch> = null;
@@ -2482,6 +2513,7 @@ export async function launchAgentForRepos(
 			await cleanupTodoFiles(effectivePath);
 			await cleanupQuestionFiles(effectivePath);
 			await clearCheckpoint(detail.key);
+			completedEffectivePaths.push(effectivePath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			console.log(chalk.yellow(`  Checkpoint preserved for ${detail.key}. Resume on next run.`));
@@ -2494,6 +2526,7 @@ export async function launchAgentForRepos(
 		}
 	}
 
+	await publishCompletionSummary(detail.key, completedEffectivePaths);
 	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 
 	await updateJob(detail.key, {
@@ -2727,6 +2760,7 @@ export async function launchAgentInBackground(
 		const failedCount = subResults.filter((r) => r.status === 'failed').length;
 		const hasIncomplete = totalConflicts.length > 0 || failedCount > 0 || branchAnalyses.some((a) => a.hasUncommittedChanges);
 
+		await publishCompletionSummary(detail.key, [effectivePath]);
 		await notifySlackStatus(
 			`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.${hasIncomplete ? ' Some work may be incomplete — review needed.' : ''}`,
 		);
@@ -3076,6 +3110,7 @@ export async function launchMultipleTickets(
 
 			statuses[i].status = 'done';
 			statuses[i].worktreePaths = worktreePaths;
+			await publishCompletionSummary(detail.key, worktreePaths.length > 0 ? worktreePaths : paths);
 			await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 		} catch (error) {
 			statuses[i].status = 'failed';

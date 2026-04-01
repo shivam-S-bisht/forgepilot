@@ -1399,3 +1399,95 @@ export async function readContributing(repoPath: string): Promise<string> {
 	}
 	return '';
 }
+
+// ---------------------------------------------------------------------------
+// Completion summary — gathers git stats for a ticket branch
+// ---------------------------------------------------------------------------
+
+export interface TicketCompletionSummary {
+	ticketKey: string;
+	repoPath: string;
+	repoName: string;
+	commitCount: number;
+	commitLog: string;
+	diffStat: string;
+	filesChanged: number;
+	insertions: number;
+	deletions: number;
+}
+
+export async function generateCompletionSummary(
+	repoPath: string,
+	ticketKey: string,
+): Promise<TicketCompletionSummary> {
+	const baseBranch = getBaseBranch();
+	const repoName = path.basename(repoPath);
+
+	let commitLog = '';
+	try {
+		commitLog = await gitExec(repoPath, ['log', `${baseBranch}..HEAD`, '--oneline']);
+	} catch {
+		try {
+			commitLog = await gitExec(repoPath, ['log', '--oneline', '-20']);
+		} catch {
+			commitLog = '';
+		}
+	}
+	const commitCount = commitLog.split('\n').filter(Boolean).length;
+
+	let diffStat = '';
+	try {
+		diffStat = await gitExec(repoPath, ['diff', '--stat', `${baseBranch}...HEAD`]);
+	} catch {
+		try {
+			diffStat = await gitExec(repoPath, ['diff', '--stat', 'HEAD~5..HEAD']);
+		} catch {
+			diffStat = '';
+		}
+	}
+
+	let filesChanged = 0;
+	let insertions = 0;
+	let deletions = 0;
+	try {
+		const shortstat = await gitExec(repoPath, ['diff', '--shortstat', `${baseBranch}...HEAD`]);
+		const filesMatch = shortstat.match(/(\d+)\s+files?\s+changed/);
+		const insMatch = shortstat.match(/(\d+)\s+insertions?/);
+		const delMatch = shortstat.match(/(\d+)\s+deletions?/);
+		if (filesMatch) filesChanged = parseInt(filesMatch[1], 10);
+		if (insMatch) insertions = parseInt(insMatch[1], 10);
+		if (delMatch) deletions = parseInt(delMatch[1], 10);
+	} catch {
+		// Best-effort; stats may not be available.
+	}
+
+	return {
+		ticketKey,
+		repoPath,
+		repoName,
+		commitCount,
+		commitLog,
+		diffStat,
+		filesChanged,
+		insertions,
+		deletions,
+	};
+}
+
+export function formatCompletionSummaryText(summaries: TicketCompletionSummary[]): string {
+	if (summaries.length === 0) return '';
+	const ticketKey = summaries[0].ticketKey;
+	const lines: string[] = [`ForgePilot work summary for ${ticketKey}:`];
+
+	for (const s of summaries) {
+		if (summaries.length > 1) lines.push(`\nRepo: ${s.repoName}`);
+		lines.push(`  ${s.commitCount} commit(s) | ${s.filesChanged} file(s) changed | +${s.insertions} −${s.deletions}`);
+		if (s.commitLog) {
+			const commits = s.commitLog.split('\n').filter(Boolean).slice(0, 15);
+			for (const c of commits) lines.push(`  • ${c}`);
+			if (s.commitLog.split('\n').filter(Boolean).length > 15) lines.push('  … and more');
+		}
+	}
+
+	return lines.join('\n');
+}
