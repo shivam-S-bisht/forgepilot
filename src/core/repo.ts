@@ -345,9 +345,8 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		if (allValid) {
 			console.log(chalk.gray(`Using cached repo selection for ${detail.key}:`));
 			for (const p of cached) {
-				const name = path.basename(p);
-				repoMap.set(name, p);
-				console.log(chalk.green(`  ✓ ${name} → ${p}`));
+				repoMap.set(p, p);
+				console.log(chalk.green(`  ✓ ${path.basename(p)} → ${p}`));
 			}
 			return repoMap;
 		}
@@ -423,7 +422,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 				{ id: 'pick', label: 'No — let me pick manually' },
 			]);
 			if (confirmChoice === 'yes') {
-				for (const p of aiMatched) repoMap.set(path.basename(p), p);
+				for (const p of aiMatched) repoMap.set(p, p);
 				await setCached(cacheKey, aiMatched);
 				return repoMap;
 			}
@@ -442,14 +441,14 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 			if (!manualPath) throw new Error('No repo path provided.');
 			const resolved = await resolveManualUrl(manualPath, localRepoPaths);
 			if (resolved) {
-				repoMap.set(path.basename(resolved), resolved);
+				repoMap.set(resolved, resolved);
 				await setCached(cacheKey, [resolved]);
 				console.log(chalk.green(`  ✓ ${path.basename(resolved)} → ${resolved}`));
 				return repoMap;
 			}
 			const asPath = path.resolve(manualPath.replace(/^~/, process.env.HOME ?? '~'));
 			if (!existsSync(path.join(asPath, '.git'))) throw new Error(`Not a git repository: ${asPath}`);
-			repoMap.set('manual', asPath);
+			repoMap.set(asPath, asPath);
 			await setCached(cacheKey, [asPath]);
 			return repoMap;
 		}
@@ -479,7 +478,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 
 		await setCached(cacheKey, repoPicks);
 		for (const p of repoPicks) {
-			repoMap.set(path.basename(p), p);
+			repoMap.set(p, p);
 			console.log(chalk.green(`  ✓ ${path.basename(p)} → ${p}`));
 		}
 		return repoMap;
@@ -512,7 +511,7 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 		}
 
 		for (const p of repoPicks) {
-			repoMap.set(path.basename(p), p);
+			repoMap.set(p, p);
 			console.log(chalk.green(`  ✓ ${path.basename(p)} → ${p}`));
 		}
 	}
@@ -533,7 +532,7 @@ export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map
 	if (cached?.length) {
 		const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
 		if (allValid) {
-			for (const p of cached) repoMap.set(path.basename(p), p);
+			for (const p of cached) repoMap.set(p, p);
 			return repoMap;
 		}
 	}
@@ -607,7 +606,7 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 		const allValid = cached.every((p) => existsSync(path.join(p, '.git')));
 		if (allValid) {
 			for (const p of cached) {
-				repoMap.set(path.basename(p), p);
+				repoMap.set(p, p);
 				console.log(chalk.green(`  Using cached repo: ${path.basename(p)} → ${p}`));
 			}
 			return repoMap;
@@ -634,7 +633,7 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 
 	await setCached(cacheKey, selectedPaths);
 	for (const p of selectedPaths) {
-		repoMap.set(path.basename(p), p);
+		repoMap.set(p, p);
 		console.log(chalk.green(`  Selected repo: ${path.basename(p)} → ${p} (via Slack)`));
 	}
 
