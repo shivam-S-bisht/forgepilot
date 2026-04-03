@@ -2,6 +2,8 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.29](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.28...v0.1.29) (2026-04-03)
+
 ### [0.1.28](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.27...v0.1.28) (2026-04-01)
 
 ### [0.1.27](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.26...v0.1.27) (2026-03-19)
