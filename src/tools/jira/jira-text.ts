@@ -772,3 +772,43 @@ export function buildSpikePrompt(
 
 	return sections.join('\n');
 }
+
+export function buildFollowUpPrompt(
+	detail: JiraIssueDetail,
+	aiSummary: string,
+	userRequest: string,
+	contributing?: string,
+	clarifications?: string,
+): string {
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+
+	const sections: string[] = [
+		`You are continuing work on Jira ticket ${detail.key}: ${title}`,
+		'',
+		'=== ORIGINAL TICKET ===',
+		`Description:\n${description.slice(0, 4000)}`,
+		'',
+		'=== WORK ALREADY COMPLETED ===',
+		'The following work has already been done on this ticket. Do NOT redo any of this — build on it.',
+		'',
+		aiSummary,
+		'',
+		'=== ADDITIONAL REQUEST FROM THE USER ===',
+		userRequest,
+		'',
+		'=== INSTRUCTIONS ===',
+		'- Focus ONLY on the additional request above.',
+		'- Do not revert or redo existing work.',
+		'- Commit your changes with clear, descriptive messages.',
+	];
+
+	if (contributing) {
+		sections.push('', '=== CONTRIBUTING GUIDELINES ===', contributing.slice(0, 2000));
+	}
+	if (clarifications) {
+		sections.push('', '=== PRIOR CLARIFICATIONS ===', clarifications.slice(0, 2000));
+	}
+
+	return sections.join('\n');
+}

@@ -1411,9 +1411,11 @@ export interface TicketCompletionSummary {
 	commitCount: number;
 	commitLog: string;
 	diffStat: string;
+	fileList: string;
 	filesChanged: number;
 	insertions: number;
 	deletions: number;
+	aiSummary?: string;
 }
 
 export async function generateCompletionSummary(
@@ -1461,6 +1463,13 @@ export async function generateCompletionSummary(
 		// Best-effort; stats may not be available.
 	}
 
+	let fileList = '';
+	try {
+		fileList = await gitExec(repoPath, ['diff', '--name-only', `${baseBranch}...HEAD`]);
+	} catch {
+		// Best-effort.
+	}
+
 	return {
 		ticketKey,
 		repoPath,
@@ -1468,6 +1477,7 @@ export async function generateCompletionSummary(
 		commitCount,
 		commitLog,
 		diffStat,
+		fileList,
 		filesChanged,
 		insertions,
 		deletions,
@@ -1477,17 +1487,66 @@ export async function generateCompletionSummary(
 export function formatCompletionSummaryText(summaries: TicketCompletionSummary[]): string {
 	if (summaries.length === 0) return '';
 	const ticketKey = summaries[0].ticketKey;
-	const lines: string[] = [`ForgePilot work summary for ${ticketKey}:`];
 
+	// If any summary has an AI-generated overview, use that
+	const hasAi = summaries.some((s) => s.aiSummary);
+	if (hasAi) {
+		const lines: string[] = [`ForgePilot work summary for ${ticketKey}:`];
+		for (const s of summaries) {
+			if (summaries.length > 1) lines.push(`\nRepo: ${s.repoName}`);
+			if (s.aiSummary) {
+				lines.push(s.aiSummary);
+			} else {
+				lines.push(`  ${s.commitCount} commit(s) | ${s.filesChanged} file(s) changed | +${s.insertions} −${s.deletions}`);
+			}
+		}
+		return lines.join('\n');
+	}
+
+	// Fallback: raw stats
+	const lines: string[] = [`ForgePilot work summary for ${ticketKey}:`];
 	for (const s of summaries) {
 		if (summaries.length > 1) lines.push(`\nRepo: ${s.repoName}`);
 		lines.push(`  ${s.commitCount} commit(s) | ${s.filesChanged} file(s) changed | +${s.insertions} −${s.deletions}`);
+		if (s.fileList) {
+			const files = s.fileList.split('\n').filter(Boolean).slice(0, 20);
+			for (const f of files) lines.push(`  • ${f}`);
+			if (s.fileList.split('\n').filter(Boolean).length > 20) lines.push('  … and more');
+		}
+	}
+	return lines.join('\n');
+}
+
+export function buildSummaryPrompt(summaries: TicketCompletionSummary[]): string {
+	if (summaries.length === 0) return '';
+	const ticketKey = summaries[0].ticketKey;
+
+	const sections: string[] = [
+		`Summarize the following code changes made for Jira ticket ${ticketKey}.`,
+		'',
+		'Output requirements:',
+		'- Start with a 2-3 sentence functional overview of what was accomplished.',
+		'- List key files changed and briefly describe what was modified in each (group by feature/area).',
+		'- Highlight major functionality added, changed, or fixed.',
+		'- Do NOT list raw commit hashes or repeat commit messages verbatim.',
+		'- Keep it concise and useful for a code reviewer or stakeholder.',
+		'- Use plain text, no markdown formatting.',
+		'',
+	];
+
+	for (const s of summaries) {
+		if (summaries.length > 1) sections.push(`--- Repo: ${s.repoName} ---`);
+		sections.push(`Stats: ${s.commitCount} commit(s), ${s.filesChanged} file(s) changed, +${s.insertions} −${s.deletions}`);
 		if (s.commitLog) {
-			const commits = s.commitLog.split('\n').filter(Boolean).slice(0, 15);
-			for (const c of commits) lines.push(`  • ${c}`);
-			if (s.commitLog.split('\n').filter(Boolean).length > 15) lines.push('  … and more');
+			sections.push('', 'Commit messages:', s.commitLog);
+		}
+		if (s.fileList) {
+			sections.push('', 'Files changed:', s.fileList);
+		}
+		if (s.diffStat) {
+			sections.push('', 'Diff stats:', s.diffStat);
 		}
 	}
 
-	return lines.join('\n');
+	return sections.join('\n');
 }

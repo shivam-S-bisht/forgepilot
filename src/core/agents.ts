@@ -9,10 +9,11 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText, buildSummaryPrompt } from '../tools/git/git.js';
+import type { TicketCompletionSummary } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment, SubAgentBranchAnalysis } from '../tools/git/git.js';
 import { transitionIssueToInProgress, addJiraComment } from '../tools/jira/jira.js';
-import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
+import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, buildFollowUpPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
@@ -543,7 +544,8 @@ export async function runCommandBackground(
 		if (child.pid) untrackBackgroundPid(child.pid);
 		await logFd.close();
 		if (code === 0 && cwd) {
-			await publishCompletionSummary(ticketKey, [cwd]);
+			const resolvedOption = agentOptionId ? resolveAgentOptionById(agentOptionId) : undefined;
+			await publishCompletionSummary(ticketKey, [cwd], resolvedOption);
 		}
 		await updateJob(ticketKey, {
 			status: code === 0 ? 'done' : 'failed',
@@ -2174,18 +2176,58 @@ async function askCustomTaskClarifications(
 // Publish a work summary when a ticket completes (Slack + Jira comment)
 // ---------------------------------------------------------------------------
 
+async function generateAiSummaryForPaths(
+	ticketKey: string,
+	effectivePaths: string[],
+	agentOption: WorkAgentOption,
+): Promise<{ summaries: TicketCompletionSummary[]; text: string }> {
+	const summaries = await Promise.all(
+		effectivePaths.map((p) => generateCompletionSummary(p, ticketKey)),
+	);
+	const nonEmpty = summaries.filter((s) => s.commitCount > 0);
+	if (nonEmpty.length === 0) return { summaries: nonEmpty, text: '' };
+
+	// Try to generate an AI summary using the same agent that did the work
+	const prompt = buildSummaryPrompt(nonEmpty);
+	if (prompt) {
+		try {
+			const { command, args } = resolveAgentCommand(agentOption, prompt, effectivePaths[0], '');
+			const { stdout } = await execFileAsync(command, args, {
+				cwd: effectivePaths[0],
+				maxBuffer: 5 * 1024 * 1024,
+				timeout: 90_000,
+			});
+			const aiText = stdout.trim();
+			if (aiText.length > 20) {
+				for (const s of nonEmpty) s.aiSummary = aiText;
+			}
+		} catch {
+			// AI summary failed — fall back to raw stats
+		}
+	}
+
+	return { summaries: nonEmpty, text: formatCompletionSummaryText(nonEmpty) };
+}
+
 async function publishCompletionSummary(
 	ticketKey: string,
 	effectivePaths: string[],
+	agentOption?: WorkAgentOption,
 ): Promise<void> {
 	try {
-		const summaries = await Promise.all(
-			effectivePaths.map((p) => generateCompletionSummary(p, ticketKey)),
-		);
-		const nonEmpty = summaries.filter((s) => s.commitCount > 0);
-		if (nonEmpty.length === 0) return;
+		let text: string;
+		if (agentOption) {
+			({ text } = await generateAiSummaryForPaths(ticketKey, effectivePaths, agentOption));
+		} else {
+			const summaries = await Promise.all(
+				effectivePaths.map((p) => generateCompletionSummary(p, ticketKey)),
+			);
+			const nonEmpty = summaries.filter((s) => s.commitCount > 0);
+			if (nonEmpty.length === 0) return;
+			text = formatCompletionSummaryText(nonEmpty);
+		}
+		if (!text) return;
 
-		const text = formatCompletionSummaryText(nonEmpty);
 		await notifySlackStatus(text);
 		await addJiraComment(ticketKey, text).catch(() => {
 			// Jira comment is best-effort; don't fail the completion for it.
@@ -2193,6 +2235,94 @@ async function publishCompletionSummary(
 	} catch {
 		// Summary publishing is best-effort.
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Interactive review-and-iterate loop (foreground only)
+// ---------------------------------------------------------------------------
+
+async function reviewAndIterateLoop(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	effectivePaths: string[],
+	jiraUrl: string,
+	referenceRepoPaths: string[],
+	contributing?: string,
+	clarifications?: string,
+): Promise<string> {
+	const maxRounds = 10;
+	let lastSummaryText = '';
+
+	for (let round = 0; round < maxRounds; round++) {
+		// Generate fresh summary
+		const { summaries, text } = await generateAiSummaryForPaths(detail.key, effectivePaths, agentOption);
+		lastSummaryText = text;
+
+		if (!text || summaries.length === 0) {
+			console.log(chalk.gray('\n  No changes detected to summarize.'));
+			break;
+		}
+
+		// Display summary
+		console.log('');
+		console.log(chalk.bold.cyan('  ╔══════════════════════════════════════════════════════════════════╗'));
+		console.log(chalk.bold.cyan('  ║') + chalk.bold('  Work Summary') + chalk.bold.cyan('                                                    ║'));
+		console.log(chalk.bold.cyan('  ╠══════════════════════════════════════════════════════════════════╣'));
+		for (const line of text.split('\n')) {
+			const padded = `  ${line}`.padEnd(66);
+			console.log(chalk.bold.cyan('  ║') + chalk.white(padded) + chalk.bold.cyan('║'));
+		}
+		console.log(chalk.bold.cyan('  ╚══════════════════════════════════════════════════════════════════╝'));
+		console.log('');
+
+		const choice = await askUserChoice(
+			'How would you like to proceed?',
+			[
+				{ id: 'done', label: '✓ Looks good — finish up' },
+				{ id: 'more', label: '✏ Add functionality / make changes' },
+				{ id: 'diff', label: '📋 Show raw diff stats' },
+			],
+		);
+
+		if (choice === 'done') {
+			break;
+		}
+
+		if (choice === 'diff') {
+			for (const s of summaries) {
+				if (summaries.length > 1) console.log(chalk.bold(`\n  Repo: ${s.repoName}`));
+				console.log(chalk.gray(s.diffStat || '  (no diff stats)'));
+				if (s.fileList) {
+					console.log(chalk.gray('\n  Files changed:'));
+					for (const f of s.fileList.split('\n').filter(Boolean)) {
+						console.log(chalk.gray(`    ${f}`));
+					}
+				}
+			}
+			// Re-show the prompt (don't count as a round)
+			round--;
+			continue;
+		}
+
+		if (choice === 'more') {
+			const userRequest = await askUser(chalk.cyan('  What would you like to add or change? '));
+			if (!userRequest.trim()) {
+				console.log(chalk.yellow('  No input provided. Skipping.'));
+				round--;
+				continue;
+			}
+
+			const aiSummary = summaries[0].aiSummary ?? text;
+			const followUpPrompt = buildFollowUpPrompt(detail, aiSummary, userRequest, contributing, clarifications);
+
+			for (const ep of effectivePaths) {
+				console.log(chalk.bold(`\n  Re-running ${agentOption.label} in ${ep}...`));
+				await dispatchAgent(agentOption, followUpPrompt, ep, jiraUrl, referenceRepoPaths);
+			}
+		}
+	}
+
+	return lastSummaryText;
 }
 
 export async function launchAgentForRepos(
@@ -2336,7 +2466,19 @@ export async function launchAgentForRepos(
 			}
 		}
 
-		await publishCompletionSummary(detail.key, paths);
+		const spikeSummary = await reviewAndIterateLoop(
+			detail,
+			agentOption,
+			paths,
+			jiraUrl,
+			referenceRepoPaths,
+			firstRepoContributing ?? undefined,
+			clarifications,
+		);
+		if (spikeSummary) {
+			await notifySlackStatus(spikeSummary);
+			await addJiraComment(detail.key, spikeSummary).catch(() => {});
+		}
 		await notifySlackStatus(`ForgePilot completed spike investigation for ${detail.key}.`);
 		await updateJob(detail.key, { status: 'done', finishedAt: new Date().toISOString() });
 		return;
@@ -2526,7 +2668,22 @@ export async function launchAgentForRepos(
 		}
 	}
 
-	await publishCompletionSummary(detail.key, completedEffectivePaths);
+	// Interactive review-and-iterate loop — show AI summary, let user request more work
+	const finalSummary = await reviewAndIterateLoop(
+		detail,
+		agentOption,
+		completedEffectivePaths,
+		jiraUrl,
+		referenceRepoPaths,
+		firstRepoContributing ?? undefined,
+		clarifications,
+	);
+
+	// Publish the final summary to Slack + Jira
+	if (finalSummary) {
+		await notifySlackStatus(finalSummary);
+		await addJiraComment(detail.key, finalSummary).catch(() => {});
+	}
 	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 
 	await updateJob(detail.key, {
@@ -2760,7 +2917,7 @@ export async function launchAgentInBackground(
 		const failedCount = subResults.filter((r) => r.status === 'failed').length;
 		const hasIncomplete = totalConflicts.length > 0 || failedCount > 0 || branchAnalyses.some((a) => a.hasUncommittedChanges);
 
-		await publishCompletionSummary(detail.key, [effectivePath]);
+		await publishCompletionSummary(detail.key, [effectivePath], effectiveOption);
 		await notifySlackStatus(
 			`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.${hasIncomplete ? ' Some work may be incomplete — review needed.' : ''}`,
 		);
@@ -3110,7 +3267,21 @@ export async function launchMultipleTickets(
 
 			statuses[i].status = 'done';
 			statuses[i].worktreePaths = worktreePaths;
-			await publishCompletionSummary(detail.key, worktreePaths.length > 0 ? worktreePaths : paths);
+			const ticketEffPaths = worktreePaths.length > 0 ? worktreePaths : paths;
+			const ticketJiraUrl = getJiraBrowseUrl(detail);
+			const finalSummary = await reviewAndIterateLoop(
+				detail,
+				agentOption,
+				ticketEffPaths,
+				ticketJiraUrl,
+				refRepoPaths,
+				firstRepoContributing ?? undefined,
+				clarifications,
+			);
+			if (finalSummary) {
+				await notifySlackStatus(finalSummary);
+				await addJiraComment(detail.key, finalSummary).catch(() => {});
+			}
 			await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 		} catch (error) {
 			statuses[i].status = 'failed';
