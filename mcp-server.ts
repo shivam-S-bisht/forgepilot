@@ -751,7 +751,7 @@ server.tool(
 
 server.tool(
 	'launch_background_agent',
-	'Launch an AI agent in the background for a Jira ticket. Returns the job record with PID and log file path.',
+	'Launch an AI agent in the background for a Jira ticket. Returns the job record with PID and log file path. The job is only marked done after automated completion verification passes.',
 	{
 		ticket_key: z.string().describe('Jira ticket key, e.g. CE-1234'),
 		agent_id: z.string().describe('Agent option ID, e.g. claude-code-autonomous, copilot-autonomous'),

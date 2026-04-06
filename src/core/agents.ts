@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { open as fsOpen } from 'node:fs/promises';
 import path from 'node:path';
@@ -12,8 +12,8 @@ import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
 import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText, buildSummaryPrompt } from '../tools/git/git.js';
 import type { TicketCompletionSummary } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment, SubAgentBranchAnalysis } from '../tools/git/git.js';
-import { transitionIssueToInProgress, addJiraComment } from '../tools/jira/jira.js';
-import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, buildFollowUpPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
+import { transitionIssueToInProgress, addJiraComment, fetchIssueDetail } from '../tools/jira/jira.js';
+import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, buildFollowUpPrompt, buildVerificationFollowUpPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
 import { resolveRepoPathsForMultipleTickets } from './repo.js';
@@ -459,6 +459,541 @@ async function cleanupQuestionFiles(repoPath: string): Promise<void> {
 	}
 }
 
+type PackageManager = 'npm' | 'pnpm' | 'yarn';
+type VerificationCommandKind = 'lint' | 'typecheck' | 'build' | 'test' | 'coverage';
+
+type RepoVerificationCommand = {
+	kind: VerificationCommandKind;
+	scriptName: string;
+	command: string;
+	args: string[];
+	display: string;
+};
+
+type RepoVerificationCommandResult = {
+	kind: VerificationCommandKind;
+	scriptName: string;
+	display: string;
+	ok: boolean;
+	output: string;
+};
+
+type RepoVerificationSummary = {
+	repoPath: string;
+	repoName: string;
+	pendingTodoItems: string[];
+	completedTodoItems: string[];
+	totalTodoItems: number;
+	commands: RepoVerificationCommandResult[];
+	allCommandsPassed: boolean;
+	hasCoverageCommand: boolean;
+	coveragePassed: boolean | null;
+};
+
+type CompletionCheckDecision = {
+	verdict: 'done' | 'more_work';
+	summary: string;
+	missingItems: string[];
+	followUpTasks: string[];
+};
+
+type CompletionAssessment = {
+	summaries: TicketCompletionSummary[];
+	summaryText: string;
+	repoChecks: RepoVerificationSummary[];
+	decision: CompletionCheckDecision;
+};
+
+function detectPackageManager(repoPath: string): PackageManager {
+	const packageJsonPath = path.join(repoPath, 'package.json');
+	if (existsSync(packageJsonPath)) {
+		try {
+			const raw = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { packageManager?: string };
+			const packageManager = raw.packageManager?.toLowerCase() ?? '';
+			if (packageManager.startsWith('pnpm@')) return 'pnpm';
+			if (packageManager.startsWith('yarn@')) return 'yarn';
+			if (packageManager.startsWith('npm@')) return 'npm';
+		} catch {
+			// Fall back to lockfile detection below.
+		}
+	}
+
+	if (existsSync(path.join(repoPath, 'pnpm-lock.yaml'))) return 'pnpm';
+	if (existsSync(path.join(repoPath, 'yarn.lock'))) return 'yarn';
+	return 'npm';
+}
+
+async function readPackageScripts(repoPath: string): Promise<Record<string, string>> {
+	const packageJsonPath = path.join(repoPath, 'package.json');
+	if (!existsSync(packageJsonPath)) return {};
+
+	try {
+		const raw = JSON.parse(await fs.readFile(packageJsonPath, 'utf8')) as { scripts?: Record<string, string> };
+		return raw.scripts ?? {};
+	} catch {
+		return {};
+	}
+}
+
+function buildScriptCommand(
+	packageManager: PackageManager,
+	scriptName: string,
+): { command: string; args: string[]; display: string } {
+	if (packageManager === 'pnpm') {
+		return { command: 'pnpm', args: [scriptName], display: `pnpm ${scriptName}` };
+	}
+	if (packageManager === 'yarn') {
+		return { command: 'yarn', args: [scriptName], display: `yarn ${scriptName}` };
+	}
+	return { command: 'npm', args: ['run', scriptName], display: `npm run ${scriptName}` };
+}
+
+async function buildRepoVerificationCommands(repoPath: string): Promise<RepoVerificationCommand[]> {
+	const scripts = await readPackageScripts(repoPath);
+	if (Object.keys(scripts).length === 0) return [];
+
+	const packageManager = detectPackageManager(repoPath);
+	const commands: RepoVerificationCommand[] = [];
+	const add = (kind: VerificationCommandKind, scriptName: string) => {
+		if (!scripts[scriptName]) return;
+		const command = buildScriptCommand(packageManager, scriptName);
+		commands.push({ kind, scriptName, ...command });
+	};
+
+	add('lint', 'lint');
+	add('typecheck', 'typecheck');
+	add('build', 'build');
+
+	if (scripts['test:coverage']) {
+		add('coverage', 'test:coverage');
+	} else if (scripts.coverage) {
+		add('coverage', 'coverage');
+	} else if (scripts.test) {
+		add('test', 'test');
+	} else if (scripts['test:ci']) {
+		add('test', 'test:ci');
+	}
+
+	return commands;
+}
+
+function truncateText(text: string, maxChars = 3000): string {
+	if (text.length <= maxChars) return text;
+	return `${text.slice(0, maxChars)}\n... [truncated]`;
+}
+
+function getExecOutput(error: unknown): string {
+	if (error && typeof error === 'object') {
+		const stdout = 'stdout' in error && typeof error.stdout === 'string' ? error.stdout : '';
+		const stderr = 'stderr' in error && typeof error.stderr === 'string' ? error.stderr : '';
+		const message = error instanceof Error ? error.message : String(error);
+		return [stdout, stderr, message].filter(Boolean).join('\n').trim();
+	}
+	return String(error);
+}
+
+async function runRepoVerification(repoPath: string, ticketKey: string): Promise<RepoVerificationSummary> {
+	const progress = await parseTodoProgress(repoPath, ticketKey);
+	const commands = await buildRepoVerificationCommands(repoPath);
+	const results: RepoVerificationCommandResult[] = [];
+
+	for (const verificationCommand of commands) {
+		console.log(chalk.gray(`  Running verification in ${path.basename(repoPath)}: ${verificationCommand.display}`));
+		try {
+			const { stdout, stderr } = await execFileAsync(
+				verificationCommand.command,
+				verificationCommand.args,
+				{ cwd: repoPath, maxBuffer: 10 * 1024 * 1024, timeout: 300_000 },
+			) as { stdout: string; stderr: string };
+			results.push({
+				kind: verificationCommand.kind,
+				scriptName: verificationCommand.scriptName,
+				display: verificationCommand.display,
+				ok: true,
+				output: truncateText([stdout, stderr].filter(Boolean).join('\n').trim()),
+			});
+		} catch (error) {
+			results.push({
+				kind: verificationCommand.kind,
+				scriptName: verificationCommand.scriptName,
+				display: verificationCommand.display,
+				ok: false,
+				output: truncateText(getExecOutput(error)),
+			});
+		}
+	}
+
+	const coverageResult = results.find((result) => result.kind === 'coverage');
+
+	return {
+		repoPath,
+		repoName: path.basename(repoPath),
+		pendingTodoItems: progress?.pending ?? [],
+		completedTodoItems: progress?.completedItems ?? [],
+		totalTodoItems: progress?.total ?? 0,
+		commands: results,
+		allCommandsPassed: results.every((result) => result.ok),
+		hasCoverageCommand: commands.some((command) => command.kind === 'coverage'),
+		coveragePassed: coverageResult ? coverageResult.ok : null,
+	};
+}
+
+function formatRepoVerificationForPrompt(repoChecks: RepoVerificationSummary[]): string {
+	if (repoChecks.length === 0) return 'No verification data.';
+
+	return repoChecks.map((repoCheck) => {
+		const lines = [`Repo: ${repoCheck.repoName}`];
+		if (repoCheck.totalTodoItems > 0) {
+			lines.push(
+				`Todo progress: ${repoCheck.completedTodoItems.length}/${repoCheck.totalTodoItems} complete; pending: ${repoCheck.pendingTodoItems.length}`,
+			);
+			if (repoCheck.pendingTodoItems.length > 0) {
+				for (const item of repoCheck.pendingTodoItems) lines.push(`Pending todo: ${item}`);
+			}
+		} else {
+			lines.push('Todo progress: no todo file present at verification time');
+		}
+
+		if (repoCheck.commands.length === 0) {
+			lines.push('Verification commands: none detected');
+		} else {
+			for (const command of repoCheck.commands) {
+				lines.push(`Verification: ${command.display} => ${command.ok ? 'PASS' : 'FAIL'}`);
+				if (command.output) lines.push(`Output:\n${truncateText(command.output, 1500)}`);
+			}
+		}
+
+		return lines.join('\n');
+	}).join('\n\n');
+}
+
+function displayRepoVerificationSummary(repoChecks: RepoVerificationSummary[]): void {
+	if (repoChecks.length === 0) return;
+
+	console.log(chalk.bold.cyan('\n  Automated verification:'));
+	for (const repoCheck of repoChecks) {
+		console.log(chalk.bold(`\n  ${repoCheck.repoName}`));
+		if (repoCheck.totalTodoItems > 0) {
+			console.log(
+				repoCheck.pendingTodoItems.length === 0
+					? chalk.green(`    Todo: ${repoCheck.completedTodoItems.length}/${repoCheck.totalTodoItems} complete`)
+					: chalk.yellow(`    Todo: ${repoCheck.completedTodoItems.length}/${repoCheck.totalTodoItems} complete, ${repoCheck.pendingTodoItems.length} pending`),
+			);
+		} else {
+			console.log(chalk.gray('    Todo: no file present'));
+		}
+
+		if (repoCheck.commands.length === 0) {
+			console.log(chalk.gray('    Verification: no supported scripts detected'));
+			continue;
+		}
+
+		for (const command of repoCheck.commands) {
+			const status = command.ok ? chalk.green('PASS') : chalk.red('FAIL');
+			console.log(`    ${status} ${command.display}`);
+			if (!command.ok && command.output) {
+				for (const line of truncateText(command.output, 600).split('\n')) {
+					console.log(chalk.gray(`      ${line}`));
+				}
+			}
+		}
+	}
+}
+
+function buildCompletionCheckPrompt(
+	detail: JiraIssueDetail,
+	aiSummary: string,
+	repoChecks: RepoVerificationSummary[],
+): string {
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+	const acceptanceCriteria = getAcceptanceCriteria(detail);
+
+	return [
+		'You are a strict release reviewer deciding whether a Jira ticket is actually done.',
+		'Use the ticket details, acceptance criteria, todo progress, and verification command results below.',
+		'',
+		'Hard rules:',
+		'- If any todo item is still unchecked, verdict must be "more_work".',
+		'- If any verification command failed, verdict must be "more_work".',
+		'- If a coverage command failed, assume the coverage threshold was not met and verdict must be "more_work".',
+		'- Only return "done" when the implemented work appears to satisfy the ticket and all detected verification checks passed.',
+		'',
+		'Output requirements:',
+		'- Return ONLY valid JSON, no markdown, no explanation before or after.',
+		'- Schema:',
+		'{',
+		'  "verdict": "done" | "more_work",',
+		'  "summary": "short reviewer summary",',
+		'  "missingItems": ["specific gap"],',
+		'  "followUpTasks": ["actionable task"]',
+		'}',
+		'- Keep followUpTasks concrete and implementation-ready.',
+		'- Max 8 followUpTasks.',
+		'',
+		`Ticket: ${detail.key}`,
+		`Title: ${title}`,
+		'',
+		`Description:\n${description.slice(0, 5000)}`,
+		'',
+		`Acceptance Criteria:\n${acceptanceCriteria.slice(0, 4000)}`,
+		'',
+		`Current Work Summary:\n${aiSummary || '(no summary available)'}`,
+		'',
+		`Verification Evidence:\n${formatRepoVerificationForPrompt(repoChecks)}`,
+	].join('\n');
+}
+
+async function runPlanningAgentPrompt(prompt: string): Promise<string> {
+	const preflightAgent = (process.env.FORGEPILOT_PREFLIGHT_AGENT ?? 'copilot').trim().toLowerCase();
+
+	if (preflightAgent === 'copilot') {
+		const { stdout } = await execFileAsync('copilot', ['-p', prompt], {
+			maxBuffer: 5 * 1024 * 1024,
+			timeout: 90_000,
+		}) as { stdout: string };
+		return stdout.trim();
+	}
+
+	if (preflightAgent === 'cursor') {
+		const { stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], {
+			maxBuffer: 5 * 1024 * 1024,
+			timeout: 90_000,
+		}) as { stdout: string };
+		return stdout.trim();
+	}
+
+	return '';
+}
+
+function fallbackCompletionDecision(repoChecks: RepoVerificationSummary[]): CompletionCheckDecision {
+	const pendingTodos = repoChecks.flatMap((repoCheck) =>
+		repoCheck.pendingTodoItems.map((item) => `${repoCheck.repoName}: ${item}`),
+	);
+	const failedCommands = repoChecks.flatMap((repoCheck) =>
+		repoCheck.commands
+			.filter((command) => !command.ok)
+			.map((command) => `${repoCheck.repoName}: ${command.display} failed`),
+	);
+
+	if (pendingTodos.length === 0 && failedCommands.length === 0) {
+		return {
+			verdict: 'done',
+			summary: 'All todos are complete and detected verification commands passed.',
+			missingItems: [],
+			followUpTasks: [],
+		};
+	}
+
+	const followUpTasks = [
+		...pendingTodos.map((item) => `Complete remaining todo item: ${item}`),
+		...failedCommands.map((item) => {
+			if (item.toLowerCase().includes('coverage')) {
+				return `Add or adjust tests so the existing coverage command passes: ${item}`;
+			}
+			return `Fix the failing verification command and re-run it: ${item}`;
+		}),
+	].slice(0, 8);
+
+	return {
+		verdict: 'more_work',
+		summary: 'Automated verification found unfinished todo items or failing verification commands.',
+		missingItems: [...pendingTodos, ...failedCommands],
+		followUpTasks,
+	};
+}
+
+async function assessTicketCompletion(
+	detail: JiraIssueDetail,
+	effectivePaths: string[],
+	agentOption: WorkAgentOption,
+): Promise<CompletionAssessment> {
+	const { summaries, text } = await generateAiSummaryForPaths(detail.key, effectivePaths, agentOption);
+	const repoChecks = await Promise.all(effectivePaths.map((repoPath) => runRepoVerification(repoPath, detail.key)));
+	const fallback = fallbackCompletionDecision(repoChecks);
+
+	const prompt = buildCompletionCheckPrompt(detail, text, repoChecks);
+	let decision = fallback;
+
+	try {
+		const raw = await runPlanningAgentPrompt(prompt);
+		const jsonMatch = raw.match(/\{[\s\S]*\}/);
+		if (jsonMatch) {
+			const parsed = JSON.parse(jsonMatch[0]) as Partial<CompletionCheckDecision>;
+			const verdict = parsed.verdict === 'done' ? 'done' : 'more_work';
+			decision = {
+				verdict,
+				summary: typeof parsed.summary === 'string' && parsed.summary.trim()
+					? parsed.summary.trim()
+					: fallback.summary,
+				missingItems: Array.isArray(parsed.missingItems)
+					? parsed.missingItems.map((item) => String(item).trim()).filter(Boolean)
+					: fallback.missingItems,
+				followUpTasks: Array.isArray(parsed.followUpTasks)
+					? parsed.followUpTasks.map((item) => String(item).trim()).filter(Boolean).slice(0, 8)
+					: fallback.followUpTasks,
+			};
+		}
+	} catch {
+		decision = fallback;
+	}
+
+	if (fallback.verdict === 'more_work') {
+		decision = {
+			verdict: 'more_work',
+			summary: decision.summary || fallback.summary,
+			missingItems: decision.missingItems.length > 0 ? decision.missingItems : fallback.missingItems,
+			followUpTasks: decision.followUpTasks.length > 0 ? decision.followUpTasks : fallback.followUpTasks,
+		};
+	}
+
+	return {
+		summaries,
+		summaryText: text,
+		repoChecks,
+		decision,
+	};
+}
+
+async function writeTodoPlanFile(
+	repoPath: string,
+	ticketKey: string,
+	title: string,
+	items: string[],
+): Promise<void> {
+	const todoPath = todoFilePath(repoPath, ticketKey);
+	const content = [
+		`# ${ticketKey}: ${title}`,
+		'',
+		...items.map((item) => `- [ ] ${item}`),
+		'',
+	].join('\n');
+	await fs.writeFile(todoPath, content, 'utf8');
+}
+
+async function runPromptWithQuestionLoop(
+	agentOption: WorkAgentOption,
+	basePrompt: string,
+	repoPath: string,
+	jiraUrl: string,
+	referenceRepoPaths: string[],
+	ticketKey: string,
+): Promise<void> {
+	let prompt = basePrompt;
+	const maxQaRounds = 5;
+
+	for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
+		await dispatchAgent(agentOption, prompt, repoPath, jiraUrl, referenceRepoPaths);
+
+		const questions = await readQuestionsFile(repoPath, ticketKey);
+		if (!questions) break;
+
+		console.log(chalk.yellow(`\n  Follow-up work paused with ${questions.length} question(s).`));
+		const qaPairs = await routeQuestions(questions, ticketKey);
+		await writeAnswersFile(repoPath, ticketKey, qaPairs);
+
+		const answersText = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
+		prompt = `${basePrompt}\n\n=== ANSWERS TO YOUR QUESTIONS ===\n${answersText}`;
+	}
+}
+
+async function automatedCompletionVerificationLoop(
+	detail: JiraIssueDetail,
+	agentOption: WorkAgentOption,
+	effectivePaths: string[],
+	jiraUrl: string,
+	referenceRepoPaths: string[],
+	contributing?: string,
+	clarifications?: string,
+): Promise<string> {
+	const maxRounds = 3;
+	let lastSummaryText = '';
+
+	for (let round = 0; round < maxRounds; round++) {
+		const assessment = await assessTicketCompletion(detail, effectivePaths, agentOption);
+		lastSummaryText = assessment.summaryText;
+
+		displayRepoVerificationSummary(assessment.repoChecks);
+		console.log(chalk.bold.cyan(`\n  Completion verdict: ${assessment.decision.verdict}`));
+		console.log(chalk.gray(`  ${assessment.decision.summary}`));
+
+		if (assessment.decision.verdict === 'done') {
+			return lastSummaryText;
+		}
+
+		const followUpTasks = assessment.decision.followUpTasks.filter(Boolean);
+		if (followUpTasks.length === 0) {
+			throw new Error('Automated verification found remaining work but could not produce follow-up tasks.');
+		}
+
+		console.log(chalk.yellow(`\n  Automated verification found ${followUpTasks.length} remaining task(s):`));
+		for (const task of followUpTasks) {
+			console.log(chalk.yellow(`    - ${task}`));
+		}
+
+		for (const repoPath of effectivePaths) {
+			await writeTodoPlanFile(repoPath, detail.key, String(detail.fields.summary ?? detail.key), followUpTasks);
+		}
+
+		const followUpPrompt = buildVerificationFollowUpPrompt(
+			detail,
+			assessment.summaryText || formatCompletionSummaryText(assessment.summaries),
+			assessment.decision.summary,
+			followUpTasks,
+			contributing,
+			clarifications,
+		);
+
+		for (const repoPath of effectivePaths) {
+			console.log(chalk.bold(`\n  Re-running ${agentOption.label} in ${repoPath} for verification fixes...`));
+			await runPromptWithQuestionLoop(
+				agentOption,
+				followUpPrompt,
+				repoPath,
+				jiraUrl,
+				referenceRepoPaths,
+				detail.key,
+			);
+		}
+	}
+
+	const finalAssessment = await assessTicketCompletion(detail, effectivePaths, agentOption);
+	throw new Error(
+		`Automated verification still found remaining work after ${maxRounds} rounds: ${finalAssessment.decision.summary}`,
+	);
+}
+
+async function validateBackgroundCompletion(
+	ticketKey: string,
+	effectivePaths: string[],
+	agentOption: WorkAgentOption,
+): Promise<{ verified: boolean; summary: string; reason?: string }> {
+	try {
+		const detail = await fetchIssueDetail(ticketKey);
+		const assessment = await assessTicketCompletion(detail, effectivePaths, agentOption);
+
+		if (assessment.decision.verdict === 'done') {
+			return { verified: true, summary: assessment.summaryText };
+		}
+
+		const reason = assessment.decision.summary || 'Automated verification found remaining work.';
+		const details = assessment.decision.followUpTasks.length > 0
+			? `${reason} Remaining tasks: ${assessment.decision.followUpTasks.join('; ')}`
+			: reason;
+
+		await notifySlackStatus(`ForgePilot background verification for ${ticketKey} failed: ${details}`);
+		await addJiraComment(ticketKey, `ForgePilot background verification needs follow-up: ${details}`).catch(() => {});
+
+		return { verified: false, summary: assessment.summaryText, reason: details };
+	} catch (error) {
+		return {
+			verified: false,
+			summary: '',
+			reason: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
 async function runCommandInteractive(command: string, args: string[], toolName: string, cwd?: string): Promise<void> {
 	await runCommandInteractiveWithEnv(command, args, toolName, cwd);
 }
@@ -545,7 +1080,16 @@ export async function runCommandBackground(
 		await logFd.close();
 		if (code === 0 && cwd) {
 			const resolvedOption = agentOptionId ? resolveAgentOptionById(agentOptionId) : undefined;
-			await publishCompletionSummary(ticketKey, [cwd], resolvedOption);
+			if (resolvedOption) {
+				await publishCompletionSummary(ticketKey, [cwd], resolvedOption);
+				const validation = await validateBackgroundCompletion(ticketKey, [cwd], resolvedOption);
+				await updateJob(ticketKey, {
+					status: validation.verified ? 'done' : 'failed',
+					error: validation.verified ? undefined : validation.reason,
+					finishedAt: new Date().toISOString(),
+				});
+				return;
+			}
 		}
 		await updateJob(ticketKey, {
 			status: code === 0 ? 'done' : 'failed',
@@ -2652,9 +3196,6 @@ export async function launchAgentForRepos(
 				}
 			}
 
-			await cleanupTodoFiles(effectivePath);
-			await cleanupQuestionFiles(effectivePath);
-			await clearCheckpoint(detail.key);
 			completedEffectivePaths.push(effectivePath);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -2667,6 +3208,16 @@ export async function launchAgentForRepos(
 			stopAxonWatch(axonChild);
 		}
 	}
+
+	await automatedCompletionVerificationLoop(
+		detail,
+		agentOption,
+		completedEffectivePaths,
+		jiraUrl,
+		referenceRepoPaths,
+		firstRepoContributing ?? undefined,
+		clarifications,
+	);
 
 	// Interactive review-and-iterate loop — show AI summary, let user request more work
 	const finalSummary = await reviewAndIterateLoop(
@@ -2684,6 +3235,11 @@ export async function launchAgentForRepos(
 		await notifySlackStatus(finalSummary);
 		await addJiraComment(detail.key, finalSummary).catch(() => {});
 	}
+	for (const effectivePath of completedEffectivePaths) {
+		await cleanupTodoFiles(effectivePath);
+		await cleanupQuestionFiles(effectivePath);
+	}
+	await clearCheckpoint(detail.key);
 	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 
 	await updateJob(detail.key, {
@@ -3257,9 +3813,6 @@ export async function launchMultipleTickets(
 						}
 					}
 
-					await cleanupTodoFiles(effectivePath);
-					await cleanupQuestionFiles(effectivePath);
-					await clearCheckpoint(detail.key);
 				} finally {
 					stopAxonWatch(axonChild);
 				}
@@ -3269,6 +3822,15 @@ export async function launchMultipleTickets(
 			statuses[i].worktreePaths = worktreePaths;
 			const ticketEffPaths = worktreePaths.length > 0 ? worktreePaths : paths;
 			const ticketJiraUrl = getJiraBrowseUrl(detail);
+			await automatedCompletionVerificationLoop(
+				detail,
+				agentOption,
+				ticketEffPaths,
+				ticketJiraUrl,
+				refRepoPaths,
+				firstRepoContributing ?? undefined,
+				clarifications,
+			);
 			const finalSummary = await reviewAndIterateLoop(
 				detail,
 				agentOption,
@@ -3282,6 +3844,11 @@ export async function launchMultipleTickets(
 				await notifySlackStatus(finalSummary);
 				await addJiraComment(detail.key, finalSummary).catch(() => {});
 			}
+			for (const effectivePath of ticketEffPaths) {
+				await cleanupTodoFiles(effectivePath);
+				await cleanupQuestionFiles(effectivePath);
+			}
+			await clearCheckpoint(detail.key);
 			await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 		} catch (error) {
 			statuses[i].status = 'failed';

@@ -710,6 +710,21 @@ If the agent is interrupted (crash, Ctrl+C, timeout), the todo file and checkpoi
 
 Checkpoint metadata (agent used, timestamp, repo path) is stored in `.cache/checkpoint-<TICKET_KEY>.json`. The resume prompt is shown via Slack when the Slack flow is active, or in the terminal otherwise.
 
+### Automated Completion Verification
+
+After the agent finishes implementation, ForgePilot now runs an automated completion review before declaring the ticket done.
+
+It checks:
+
+1. **Todo completion** — any remaining unchecked items in `.forgepilot-todos-<TICKET_KEY>.md`
+2. **Repo verification scripts** — detected `lint`, `typecheck`, `build`, `test`, and `test:coverage` / `coverage` scripts from `package.json`
+3. **Coverage thresholds** — if a coverage script exists and fails, ForgePilot treats that as incomplete work
+4. **Ticket alignment** — an AI reviewer compares the implemented work summary against the ticket description and acceptance criteria
+
+If verification finds gaps, ForgePilot creates a new follow-up todo plan, re-runs the agent on the remaining tasks, and repeats the verification loop. This currently runs for up to 3 automated follow-up rounds before failing the ticket and surfacing the remaining gaps for manual review.
+
+In background and MCP-driven runs, ForgePilot also performs the same verification pass before marking the job done. If verification still finds incomplete todo items or failing checks, the job is marked as failed instead of done so downstream agents do not treat the ticket as complete.
+
 ### MR/PR Review Comments
 
 When a ticket is re-assigned after code review, ForgePilot automatically detects open MR/PRs for the ticket branch and fetches unresolved review comments via the GitHub or GitLab API.
@@ -755,7 +770,7 @@ ForgePilot includes an MCP (Model Context Protocol) server that exposes all its 
 | `get_checkpoint` | Load checkpoint metadata for a ticket (agent, timestamps, repo path) |
 | `clear_checkpoint` | Discard checkpoint and optionally the todo file for a ticket |
 | `get_review_comments` | Find open PR/MR and fetch unresolved review comments for a ticket |
-| `launch_background_agent` | Launch an AI agent in the background for a ticket (resolves repos, prepares branch, builds prompt) |
+| `launch_background_agent` | Launch an AI agent in the background for a ticket; the job is only marked done if automated completion verification passes |
 | `list_jobs` | List all background agent jobs with status |
 | `get_job_status` | Get detailed status for a specific ticket's job |
 | `stop_job` | Stop a running background agent |

@@ -325,6 +325,7 @@ export function buildWorkPrompt(
 		'',
 		'6. VERIFY — After all items are done, run linters, type checks, and tests if the repo has them.',
 		'   Fix any errors you introduced. Ensure the build passes.',
+		'   If coverage tooling exists or you added/changed tests, make sure coverage thresholds still pass.',
 		'',
 		`7. CLEANUP — Delete ${todoFile}, ${questionsFile}, and ${answersFile} if they exist. Do NOT commit them.`,
 		'',
@@ -800,6 +801,57 @@ export function buildFollowUpPrompt(
 		'=== INSTRUCTIONS ===',
 		'- Focus ONLY on the additional request above.',
 		'- Do not revert or redo existing work.',
+		'- Commit your changes with clear, descriptive messages.',
+	];
+
+	if (contributing) {
+		sections.push('', '=== CONTRIBUTING GUIDELINES ===', contributing.slice(0, 2000));
+	}
+	if (clarifications) {
+		sections.push('', '=== PRIOR CLARIFICATIONS ===', clarifications.slice(0, 2000));
+	}
+
+	return sections.join('\n');
+}
+
+export function buildVerificationFollowUpPrompt(
+	detail: JiraIssueDetail,
+	aiSummary: string,
+	verificationSummary: string,
+	followUpTasks: string[],
+	contributing?: string,
+	clarifications?: string,
+): string {
+	const title = detail.fields.summary ?? '(no title)';
+	const description = getDescriptionText(detail);
+	const acceptanceCriteria = getAcceptanceCriteria(detail);
+	const todoFile = `.forgepilot-todos-${detail.key}.md`;
+
+	const sections: string[] = [
+		`You are continuing work on Jira ticket ${detail.key}: ${title}`,
+		'',
+		'=== ORIGINAL TICKET ===',
+		`Description:\n${description.slice(0, 4000)}`,
+		'',
+		`Acceptance Criteria:\n${acceptanceCriteria.slice(0, 3000)}`,
+		'',
+		'=== WORK ALREADY COMPLETED ===',
+		'Build on the existing implementation. Do not redo or revert completed work.',
+		'',
+		aiSummary,
+		'',
+		'=== AUTOMATED VERIFICATION FINDINGS ===',
+		verificationSummary,
+		'',
+		'=== REMAINING TASKS ===',
+		...followUpTasks.map((task) => `- ${task}`),
+		'',
+		'=== INSTRUCTIONS ===',
+		`- Recreate or update ${todoFile} so it contains ONLY the remaining tasks above as unchecked checklist items.`,
+		'- Work through the remaining tasks one by one and mark each item complete when finished.',
+		'- Re-run the relevant verification commands for the repo before stopping.',
+		'- If coverage tooling exists or tests changed, make sure coverage thresholds pass.',
+		'- Do not stop until the remaining tasks are done, unless you must ask a blocking question.',
 		'- Commit your changes with clear, descriptive messages.',
 	];
 
