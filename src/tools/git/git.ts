@@ -1385,7 +1385,8 @@ async function createMrOnPlatform(
 }
 
 export async function readContributing(repoPath: string): Promise<string> {
-	const candidates = ['CONTRIBUTING.md', 'AGENTS.md'];
+	// Prefer AGENTS.md for agent-execution guidance, then fall back to CONTRIBUTING.md.
+	const candidates = ['AGENTS.md', 'CONTRIBUTING.md'];
 	for (const filename of candidates) {
 		const filePath = path.join(repoPath, filename);
 		if (existsSync(filePath)) {

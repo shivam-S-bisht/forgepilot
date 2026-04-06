@@ -1,6 +1,6 @@
 # ForgePilot CLI
 
-A dynamic CLI that automates coding agent interactions with your repositories based on Jira tickets. It fetches tickets, resolves local repos, injects rich context (Figma designs, Axon knowledge graphs, contributing guidelines, preflight checks), and launches AI agents to do the work.
+A dynamic CLI that automates coding agent interactions with your repositories based on Jira tickets. It fetches tickets, resolves local repos, injects rich context (Figma designs, Axon knowledge graphs, AGENTS/CONTRIBUTING guidelines, preflight checks), and launches AI agents to do the work.
 
 ## How It Works
 
@@ -32,7 +32,7 @@ flowchart TD
         Preflight["Preflight Checks (AI Analysis)"]
         FigmaCtx["Fetch Figma Designs"]
         AxonCtx["Fetch Axon Knowledge Graph"]
-        Guidelines["Read Contributing Guidelines"]
+        Guidelines["Read AGENTS/CONTRIBUTING Guidelines"]
     end
 
     subgraph agentExecution [Agent Execution]
@@ -744,7 +744,7 @@ ForgePilot includes an MCP (Model Context Protocol) server that exposes all its 
 | `push_and_create_pr` | Push branch and create PR/MR (auto-detects GitHub/GitLab) |
 | `get_figma_context` | Fetch Figma design data for a ticket |
 | `get_axon_context` | Get Axon knowledge graph hint for a repo |
-| `get_contributing_guidelines` | Read CONTRIBUTING.md / AGENTS.md from a repo |
+| `get_contributing_guidelines` | Read AGENTS.md (preferred) or CONTRIBUTING.md from a repo |
 | `build_prompt` | Build the full structured AI prompt for a ticket |
 | `cache_get` | Read a value from the ForgePilot cache |
 | `cache_set` | Write a value to the cache |
@@ -791,6 +791,14 @@ Add to `claude_desktop_config.json`:
 ```
 
 The MCP server uses the same `FORGEPILOT_*` environment variables as the CLI. Make sure `FORGEPILOT_JIRA_BASE_URL`, `FORGEPILOT_JIRA_EMAIL`, and `FORGEPILOT_JIRA_API_TOKEN` are set in your shell environment.
+
+### Agent Instructions File (AGENTS.md)
+
+ForgePilot now supports repository-level agent instructions via `AGENTS.md`.
+
+- Prompt/context loaders prefer `AGENTS.md` when it exists.
+- If `AGENTS.md` is not present, ForgePilot falls back to `CONTRIBUTING.md`.
+- The MCP tool `get_contributing_guidelines` follows the same precedence.
 
 ## Release Flow
 

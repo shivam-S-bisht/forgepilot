@@ -351,7 +351,7 @@ server.tool(
 
 server.tool(
 	'get_contributing_guidelines',
-	'Read the CONTRIBUTING.md or AGENTS.md file from a repository. Returns the content (up to 12KB) for use as coding guidelines.',
+	'Read repository coding guidelines from AGENTS.md (preferred) or CONTRIBUTING.md. Returns the content (up to 12KB) for use as coding guidelines.',
 	{
 		repo_path: z.string().describe('Absolute path to the git repository'),
 	},
@@ -360,7 +360,7 @@ server.tool(
 		return {
 			content: [{
 				type: 'text',
-				text: content || 'No CONTRIBUTING.md or AGENTS.md found in this repository.',
+				text: content || 'No AGENTS.md or CONTRIBUTING.md found in this repository.',
 			}],
 		};
 	},
