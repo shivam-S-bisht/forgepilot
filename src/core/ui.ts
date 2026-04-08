@@ -80,7 +80,22 @@ export function renderRepoPicker(
 }
 
 export function clearScreen() {
-	process.stdout.write('\x1Bc');
+	// Clear visible content and move cursor to top-left.
+	// \x1b[2J clears the screen; \x1b[H moves the cursor to row 1 col 1.
+	// This intentionally does NOT hard-reset (\x1Bc) so that scroll-back history
+	// is preserved and the user can scroll up to see prior log output.
+	process.stdout.write('\x1b[2J\x1b[H');
+}
+
+export function enterAlternateScreen() {
+	// Switch to the alternate screen buffer. The main buffer (with all prior log
+	// output) is preserved and will be restored when leaveAlternateScreen() is
+	// called.
+	process.stdout.write('\x1b[?1049h');
+}
+
+export function leaveAlternateScreen() {
+	process.stdout.write('\x1b[?1049l');
 }
 
 export function renderAgentPicker(ticket: TicketView, options: WorkAgentOption[], selected: number) {

@@ -20,6 +20,8 @@ import { resolveRepoPathsFromUser } from './repo.js';
 import type { TicketRunStatus, TicketView, WorkAgentOption } from './types.js';
 import {
 	clearScreen,
+	enterAlternateScreen,
+	leaveAlternateScreen,
 	renderAgentPicker,
 	renderDetails,
 	renderList,
@@ -87,6 +89,11 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 
 	let statusRefreshInterval: ReturnType<typeof setInterval> | null = null;
 
+	// Enter alternate screen so the TUI renders in a separate buffer.
+	// When the CLI exits (any path), leaveAlternateScreen() restores the
+	// original terminal content — including all prior log scroll-back history.
+	enterAlternateScreen();
+
 	const cleanup = () => {
 		if (logTailInterval) {
 			clearInterval(logTailInterval);
@@ -100,6 +107,7 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			process.stdin.setRawMode(false);
 		}
 		process.stdin.removeAllListeners('keypress');
+		leaveAlternateScreen();
 	};
 
 	async function readLogTail(filePath: string, lines = 30): Promise<string[]> {
