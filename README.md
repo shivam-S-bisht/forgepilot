@@ -192,7 +192,13 @@ The MCP server exposes ForgePilot as tools for AI editors.
 {
   "mcpServers": {
     "forgepilot": {
-      "command": "forgepilot-mcp"
+      "command": "forgepilot-mcp",
+      "env": {
+        "FORGEPILOT_JIRA_BASE_URL": "https://yourcompany.atlassian.net",
+        "FORGEPILOT_JIRA_EMAIL": "you@company.com",
+        "FORGEPILOT_JIRA_API_TOKEN": "ATATT3x...",
+        "FORGEPILOT_FIGMA_PAT": "figd_..."
+      }
     }
   }
 }
@@ -204,11 +210,19 @@ The MCP server exposes ForgePilot as tools for AI editors.
 {
   "mcpServers": {
     "forgepilot": {
-      "command": "forgepilot-mcp"
+      "command": "forgepilot-mcp",
+      "env": {
+        "FORGEPILOT_JIRA_BASE_URL": "https://yourcompany.atlassian.net",
+        "FORGEPILOT_JIRA_EMAIL": "you@company.com",
+        "FORGEPILOT_JIRA_API_TOKEN": "ATATT3x...",
+        "FORGEPILOT_FIGMA_PAT": "figd_..."
+      }
     }
   }
 }
 ```
+
+If your editor launches MCP servers outside your login shell, shell exports alone may not be visible to ForgePilot. Put the required `FORGEPILOT_*` variables in the MCP `env` block or fully restart the editor after changing them.
 
 See [MCP Server](#mcp-server) for the full list of available tools.
 
@@ -785,7 +799,13 @@ Add to `.cursor/mcp.json` in your project or global config:
 {
   "mcpServers": {
     "forgepilot": {
-      "command": "forgepilot-mcp"
+      "command": "forgepilot-mcp",
+      "env": {
+        "FORGEPILOT_JIRA_BASE_URL": "https://yourcompany.atlassian.net",
+        "FORGEPILOT_JIRA_EMAIL": "you@company.com",
+        "FORGEPILOT_JIRA_API_TOKEN": "ATATT3x...",
+        "FORGEPILOT_FIGMA_PAT": "figd_..."
+      }
     }
   }
 }
@@ -799,13 +819,19 @@ Add to `claude_desktop_config.json`:
 {
   "mcpServers": {
     "forgepilot": {
-      "command": "forgepilot-mcp"
+      "command": "forgepilot-mcp",
+      "env": {
+        "FORGEPILOT_JIRA_BASE_URL": "https://yourcompany.atlassian.net",
+        "FORGEPILOT_JIRA_EMAIL": "you@company.com",
+        "FORGEPILOT_JIRA_API_TOKEN": "ATATT3x...",
+        "FORGEPILOT_FIGMA_PAT": "figd_..."
+      }
     }
   }
 }
 ```
 
-The MCP server uses the same `FORGEPILOT_*` environment variables as the CLI. Make sure `FORGEPILOT_JIRA_BASE_URL`, `FORGEPILOT_JIRA_EMAIL`, and `FORGEPILOT_JIRA_API_TOKEN` are set in your shell environment.
+The MCP server uses the same `FORGEPILOT_*` environment variables as the CLI. Make sure `FORGEPILOT_JIRA_BASE_URL`, `FORGEPILOT_JIRA_EMAIL`, `FORGEPILOT_JIRA_API_TOKEN`, and `FORGEPILOT_FIGMA_PAT` are available to the MCP host process. If you changed them recently, restart the editor so the MCP process picks them up.
 
 ### Agent Instructions File (AGENTS.md)
 

@@ -60,6 +60,10 @@ type FigmaImagesResponse = {
 
 type ParsedFigmaUrl = { fileKey: string; nodeId?: string; pageId?: string };
 
+type ApiFetchResult<T> =
+	| { ok: true; data: T; elapsed: number }
+	| { ok: false; elapsed: number; error: string; status?: number };
+
 type DesignToken = { name: string; category: string; value: string };
 
 type FigmaLinkCache = {
@@ -69,6 +73,7 @@ type FigmaLinkCache = {
 };
 
 const FIGMA_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MAX_FIGMA_ERROR_DETAIL_LENGTH = 240;
 
 function figmaCacheKey(url: string): string {
 	return `figma_${url.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 120)}`;
@@ -115,20 +120,32 @@ function decodeNodeId(raw: string): string {
 }
 
 export function parseFigmaUrl(url: string): ParsedFigmaUrl | null {
-	const match = url.match(/figma\.com\/(?:design|file|proto|board)\/([A-Za-z0-9]+)/);
-	if (!match) return null;
+	let parsedUrl: URL;
+	try {
+		parsedUrl = new URL(url);
+	} catch {
+		return null;
+	}
 
-	const fileKey = match[1];
+	const segments = parsedUrl.pathname.split('/').filter(Boolean);
+	if (segments.length < 2) return null;
+
+	const surface = segments[0];
+	if (!['design', 'file', 'proto', 'board'].includes(surface)) return null;
+
+	const fileKey = segments[2] === 'branch' && segments[3] ? segments[3] : segments[1];
+	if (!fileKey) return null;
+
 	let nodeId: string | undefined;
 	let pageId: string | undefined;
 
-	const nodeMatch = url.match(/[?&]node-id=([^&]+)/);
+	const nodeMatch = parsedUrl.search.match(/[?&]node-id=([^&]+)/);
 	if (nodeMatch) nodeId = decodeNodeId(nodeMatch[1]);
 
-	const startMatch = url.match(/[?&]starting-point-node-id=([^&]+)/);
+	const startMatch = parsedUrl.search.match(/[?&]starting-point-node-id=([^&]+)/);
 	if (startMatch && !nodeId) nodeId = decodeNodeId(startMatch[1]);
 
-	const pageMatch = url.match(/[?&]page-id=([^&]+)/);
+	const pageMatch = parsedUrl.search.match(/[?&]page-id=([^&]+)/);
 	if (pageMatch) pageId = decodeNodeId(pageMatch[1]);
 
 	return { fileKey, nodeId, pageId };
@@ -281,40 +298,55 @@ function figmaHeaders(): Record<string, string> {
 	return { 'X-Figma-Token': process.env.FORGEPILOT_FIGMA_PAT?.trim() ?? '' };
 }
 
-async function apiFetch<T>(url: string, label: string): Promise<{ data: T; elapsed: number } | null> {
+async function apiFetch<T>(url: string, label: string): Promise<ApiFetchResult<T>> {
 	const startTime = Date.now();
 	let response: Response;
 	try {
 		response = await fetch(url, { headers: figmaHeaders() });
 	} catch (err) {
-		console.log(chalk.yellow(`    ${label}: network error — ${err instanceof Error ? err.message : err}`));
-		return null;
+		const error = `network error: ${err instanceof Error ? err.message : String(err)}`;
+		console.log(chalk.yellow(`    ${label}: ${error}`));
+		return { ok: false, elapsed: Date.now() - startTime, error };
 	}
 	const elapsed = Date.now() - startTime;
 
 	if (!response.ok) {
-		if (response.status === 429) {
-			console.log(chalk.yellow(`    ${label}: rate limited (${elapsed}ms)`));
-		} else {
-			console.log(chalk.yellow(`    ${label}: HTTP ${response.status} (${elapsed}ms)`));
+		let responseDetail = '';
+		try {
+			const bodyText = await response.text();
+			if (bodyText.trim()) {
+				responseDetail = bodyText.trim().replace(/\s+/g, ' ').slice(0, MAX_FIGMA_ERROR_DETAIL_LENGTH);
+			}
+		} catch {
+			// Ignore response body parsing failures and keep the HTTP status detail.
 		}
-		return null;
+
+		const error = response.status === 429
+			? `rate limited${responseDetail ? `: ${responseDetail}` : ''}`
+			: `HTTP ${response.status}${responseDetail ? `: ${responseDetail}` : ''}`;
+		console.log(chalk.yellow(`    ${label}: ${error} (${elapsed}ms)`));
+		return { ok: false, elapsed, error, status: response.status };
 	}
 
 	const data = (await response.json()) as T;
 	console.log(chalk.gray(`    ${label}: OK (${elapsed}ms)`));
-	return { data, elapsed };
+	return { ok: true, data, elapsed };
 }
 
 async function fetchFigmaFileNodes(
 	fileKey: string,
 	nodeIds: string[],
-): Promise<{ nodes: FigmaNode[]; components?: Record<string, { name?: string }>; styles?: FigmaFileResponse['styles'] } | null> {
+): Promise<
+	| { nodes: FigmaNode[]; components?: Record<string, { name?: string }>; styles?: FigmaFileResponse['styles'] }
+	| { error: string }
+	| null
+> {
 	const params = new URLSearchParams({ ids: nodeIds.join(',') });
 	console.log(chalk.gray(`    Fetching node(s) ${nodeIds.join(', ')} from file ${fileKey} (full depth)`));
 
 	const result = await apiFetch<FigmaFileResponse>(`${FIGMA_API_BASE}/files/${fileKey}/nodes?${params}`, 'Nodes API');
 	if (!result) return null;
+	if (!result.ok) return { error: result.error };
 
 	const { data } = result;
 	const nodes: FigmaNode[] = [];
@@ -333,7 +365,11 @@ async function fetchFigmaFileNodes(
 async function fetchFigmaFileFull(
 	fileKey: string,
 	pageId?: string,
-): Promise<{ nodes: FigmaNode[]; components?: Record<string, { name?: string }>; styles?: FigmaFileResponse['styles'] } | null> {
+): Promise<
+	| { nodes: FigmaNode[]; components?: Record<string, { name?: string }>; styles?: FigmaFileResponse['styles'] }
+	| { error: string }
+	| null
+> {
 	const params = new URLSearchParams({ depth: '3' });
 	if (pageId) params.set('ids', pageId);
 	const label = pageId ? `page ${pageId}` : 'full file';
@@ -341,6 +377,7 @@ async function fetchFigmaFileFull(
 
 	const result = await apiFetch<FigmaFileResponse>(`${FIGMA_API_BASE}/files/${fileKey}?${params}`, 'File API');
 	if (!result) return null;
+	if (!result.ok) return { error: result.error };
 
 	const { data } = result;
 
@@ -368,6 +405,7 @@ async function exportFrameImages(fileKey: string, nodeIds: string[]): Promise<Ma
 	const params = new URLSearchParams({ ids: nodeIds.join(','), format: 'png', scale: '2' });
 	const result = await apiFetch<FigmaImagesResponse>(`${FIGMA_API_BASE}/images/${fileKey}?${params}`, 'Images API');
 	if (!result) return imageMap;
+	if (!result.ok) return imageMap;
 
 	const { data } = result;
 	if (data.images) {
@@ -532,9 +570,9 @@ export async function fetchFigmaDesignContext(detail: JiraIssueDetail): Promise<
 		console.log(
 			chalk.gray(
 				`    File: ${parsed.fileKey}` +
-					(parsed.nodeId ? `, node: ${parsed.nodeId}` : '') +
-					(parsed.pageId ? `, page: ${parsed.pageId}` : '') +
-					(!parsed.nodeId && !parsed.pageId ? ' (full file)' : ''),
+				(parsed.nodeId ? `, node: ${parsed.nodeId}` : '') +
+				(parsed.pageId ? `, page: ${parsed.pageId}` : '') +
+				(!parsed.nodeId && !parsed.pageId ? ' (full file)' : ''),
 			),
 		);
 
@@ -543,11 +581,11 @@ export async function fetchFigmaDesignContext(detail: JiraIssueDetail): Promise<
 		if (parsed.nodeId) {
 			fetchResult = await fetchFigmaFileNodes(parsed.fileKey, [parsed.nodeId]);
 
-			if (fetchResult && fetchResult.nodes.length === 1 && fetchResult.nodes[0].type === 'FRAME' && parsed.pageId) {
+			if (fetchResult && 'nodes' in fetchResult && fetchResult.nodes.length === 1 && fetchResult.nodes[0].type === 'FRAME' && parsed.pageId) {
 				const singleFrame = fetchResult.nodes[0];
 				console.log(chalk.gray(`    Node "${singleFrame.name}" is a single frame — fetching parent page for sibling frames...`));
 				const pageResult = await fetchFigmaFileNodes(parsed.fileKey, [parsed.pageId]);
-				if (pageResult && pageResult.nodes.length > 0) {
+				if (pageResult && 'nodes' in pageResult && pageResult.nodes.length > 0) {
 					const pageNode = pageResult.nodes[0];
 					const siblingFrames = (pageNode.children ?? []).filter((c) => c.type === 'FRAME');
 					if (siblingFrames.length > 1) {
@@ -560,9 +598,10 @@ export async function fetchFigmaDesignContext(detail: JiraIssueDetail): Promise<
 			fetchResult = await fetchFigmaFileFull(parsed.fileKey, parsed.pageId);
 		}
 
-		if (!fetchResult || !fetchResult.nodes.length) {
+		if (!fetchResult || !('nodes' in fetchResult) || !fetchResult.nodes.length) {
 			failedCount++;
-			frameSections.push(`Link: ${link}\n  (could not fetch design data)`);
+			const failureReason = fetchResult && 'error' in fetchResult ? fetchResult.error : 'could not fetch design data';
+			frameSections.push(`Link: ${link}\n  (${failureReason})`);
 			continue;
 		}
 
