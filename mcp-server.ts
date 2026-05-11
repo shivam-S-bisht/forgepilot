@@ -199,7 +199,7 @@ server.tool(
 	{
 		repo_path: z.string().describe('Absolute path to the local git repository'),
 		ticket_key: z.string().describe('Jira ticket key (used as branch name, e.g. "CE-1234" → branch "CE-1234")'),
-		use_worktree: z.boolean().default(false).describe('If true, creates an isolated git worktree instead of switching branches in-place'),
+		use_worktree: z.boolean().default(true).describe('If true, creates an isolated git worktree instead of switching branches in-place'),
 	},
 	async ({ repo_path, ticket_key, use_worktree }) => {
 		const effectivePath = await prepareRepoForWork(repo_path, ticket_key, use_worktree);
@@ -465,7 +465,7 @@ server.tool(
 	{
 		ticket_key: z.string().describe('Jira ticket key (e.g. "CE-1234")'),
 		root_dir: z.string().describe('Root directory containing local repos (e.g. "~/dev")'),
-		use_worktree: z.boolean().default(false).describe('If true, creates isolated git worktrees for each repo'),
+		use_worktree: z.boolean().default(true).describe('If true, creates isolated git worktrees for each repo'),
 	},
 	async ({ ticket_key, root_dir, use_worktree }) => {
 		const detail = await fetchIssueDetail(ticket_key);
@@ -847,7 +847,7 @@ server.tool(
 	{},
 	async () => {
 		const { startVoiceMode } = await import('./src/tools/voice/voice.js');
-		startVoiceMode().catch(() => {});
+		startVoiceMode().catch(() => { });
 		return {
 			content: [{
 				type: 'text',

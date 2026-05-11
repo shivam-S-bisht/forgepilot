@@ -657,7 +657,7 @@ async function resolveBugBranchStrategy(
 export async function prepareRepoForWork(
 	repoPath: string,
 	ticketKey: string,
-	useWorktree = false,
+	useWorktree = true,
 	detail?: JiraIssueDetail,
 	baseBranchOverride?: string,
 ): Promise<string> {
