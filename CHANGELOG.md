@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.32](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.31...v0.1.32) (2026-05-11)
+
+
+### Features
+
+* add ticket-driven log viewing UI ([3a44e3d](https://github.com/shivam-S-bisht/forgepilot/commit/3a44e3d5e7c323df8fde40a640b289b42dccb651))
+* harden planning flow and remove jira comments ([2bfdb48](https://github.com/shivam-S-bisht/forgepilot/commit/2bfdb48d083b7318198289aa57bcacec0c729c66))
+
 ### [0.1.31](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.30...v0.1.31) (2026-05-05)
 
 
