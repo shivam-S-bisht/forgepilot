@@ -12,7 +12,7 @@ import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
 import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText, buildSummaryPrompt } from '../tools/git/git.js';
 import type { TicketCompletionSummary } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment, SubAgentBranchAnalysis } from '../tools/git/git.js';
-import { transitionIssueToInProgress, addJiraComment, fetchIssueDetail } from '../tools/jira/jira.js';
+import { transitionIssueToInProgress, fetchIssueDetail } from '../tools/jira/jira.js';
 import { buildWorkPrompt, buildCustomTaskPrompt, buildSubTaskPrompt, buildSpikePrompt, buildFollowUpPrompt, buildVerificationFollowUpPrompt, getJiraBrowseUrl, getDescriptionText, getAcceptanceCriteria, commentsText, getIssueTypeName } from '../tools/jira/jira-text.js';
 import type { ReviewCommentForPrompt } from '../tools/jira/jira-text.js';
 import { formatClarifications, runPreflightChecks } from './preflight.js';
@@ -36,6 +36,8 @@ import {
 } from '../tools/ollama/ollama.js';
 
 const execFileAsync = promisify(execFile);
+const PLANNING_MAX_BUFFER = 5 * 1024 * 1024;
+const PLANNING_TIMEOUT_MS = 90_000;
 
 // ---------------------------------------------------------------------------
 // Background child-process tracking — kill sub-agents when parent exits
@@ -982,7 +984,6 @@ async function validateBackgroundCompletion(
 			: reason;
 
 		await notifySlackStatus(`ForgePilot background verification for ${ticketKey} failed: ${details}`);
-		await addJiraComment(ticketKey, `ForgePilot background verification needs follow-up: ${details}`).catch(() => {});
 
 		return { verified: false, summary: assessment.summaryText, reason: details };
 	} catch (error) {
@@ -2229,27 +2230,73 @@ async function generateTodoPlan(
 		modifications ? `\nUser requested modifications:\n${modifications}` : '',
 	].filter(Boolean).join('\n');
 
-	try {
-		let stdout = '';
-		if (preflightAgent === 'copilot') {
-			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else {
-			return null;
-		}
+	const stdout = await runPlanningPrompt(prompt, preflightAgent);
+	if (!stdout) return null;
 
-		const items = stdout
-			.split('\n')
-			.map((line) => line.trim())
-			.filter((line) => line.startsWith('- [ ]'))
-			.map((line) => line.replace(/^- \[ \]\s*/, '').trim())
-			.filter(Boolean);
+	const items = parseChecklistItems(stdout);
+	return items.length > 0 ? items : null;
+}
 
-		return items.length > 0 ? items : null;
-	} catch {
-		return null;
+type PlanningAgent = 'copilot' | 'cursor';
+
+function getPlanningAgentOrder(preferredAgent: string): PlanningAgent[] {
+	if (preferredAgent === 'cursor') return ['cursor', 'copilot'];
+	return ['copilot', 'cursor'];
+}
+
+async function tryRunPlanningPrompt(agent: PlanningAgent, prompt: string): Promise<string> {
+	if (agent === 'copilot') {
+		const { stdout } = await execFileAsync('copilot', ['-p', prompt], {
+			maxBuffer: PLANNING_MAX_BUFFER,
+			timeout: PLANNING_TIMEOUT_MS,
+		});
+		return stdout.trim();
 	}
+
+	const { stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], {
+		maxBuffer: PLANNING_MAX_BUFFER,
+		timeout: PLANNING_TIMEOUT_MS,
+	});
+	return stdout.trim();
+}
+
+async function runPlanningPrompt(prompt: string, preferredAgent: string): Promise<string | null> {
+	const attempts = getPlanningAgentOrder(preferredAgent);
+	for (let index = 0; index < attempts.length; index++) {
+		const agent = attempts[index];
+		try {
+			const stdout = await tryRunPlanningPrompt(agent, prompt);
+			if (stdout) return stdout;
+		} catch (error) {
+			if (index < attempts.length - 1) {
+				const message = error instanceof Error ? error.message : String(error);
+				console.log(chalk.yellow(`  ${agent} planning failed: ${message}. Trying ${attempts[index + 1]}...`));
+			}
+		}
+	}
+	return null;
+}
+
+function parseChecklistItems(stdout: string): string[] {
+	return stdout
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => /^(-\s*\[(?: |x|X)\]|[-*•]|\d+\.)\s+/.test(line))
+		.map((line) => line
+			.replace(/^-\s*\[(?: |x|X)\]\s*/, '')
+			.replace(/^[-*•]\s+/, '')
+			.replace(/^\d+\.\s+/, '')
+			.trim())
+		.filter(Boolean);
+}
+
+function parseNumberedItems(stdout: string): string[] {
+	return stdout
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => /^(\d+\.|[-*•])\s+/.test(line))
+		.map((line) => line.replace(/^(\d+\.|[-*•])\s+/, '').trim())
+		.filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
@@ -2339,25 +2386,10 @@ async function generateManualSteps(detail: JiraIssueDetail): Promise<string[]> {
 		`Acceptance Criteria:\n${ac.slice(0, 4000)}`,
 	].join('\n');
 
-	try {
-		let stdout = '';
-		if (preflightAgent === 'copilot') {
-			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else {
-			return [];
-		}
+	const stdout = await runPlanningPrompt(prompt, preflightAgent);
+	if (!stdout) return [];
 
-		return stdout
-			.split('\n')
-			.map((line) => line.trim())
-			.filter((line) => /^\d+\./.test(line))
-			.map((line) => line.replace(/^\d+\.\s*/, '').trim())
-			.filter(Boolean);
-	} catch {
-		return [];
-	}
+	return parseNumberedItems(stdout);
 }
 
 async function generateSpikeResearchPlan(detail: JiraIssueDetail, contributing: string, clarifications: string): Promise<string[]> {
@@ -2386,25 +2418,10 @@ async function generateSpikeResearchPlan(detail: JiraIssueDetail, contributing: 
 		clarifications ? `\nUser Clarifications:\n${clarifications.slice(0, 2000)}` : '',
 	].filter(Boolean).join('\n');
 
-	try {
-		let stdout = '';
-		if (preflightAgent === 'copilot') {
-			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else {
-			return [];
-		}
+	const stdout = await runPlanningPrompt(prompt, preflightAgent);
+	if (!stdout) return [];
 
-		return stdout
-			.split('\n')
-			.map((line) => line.trim())
-			.filter((line) => line.startsWith('- [ ]'))
-			.map((line) => line.replace(/^- \[ \]\s*/, '').trim())
-			.filter(Boolean);
-	} catch {
-		return [];
-	}
+	return parseChecklistItems(stdout);
 }
 
 function displayManualSteps(detail: JiraIssueDetail, reason: string, indicators: string[], steps: string[]): void {
@@ -2432,6 +2449,18 @@ const APPROVAL_PHRASES = /^\s*(looks\s*good|(?:it(?:'s|\s+is)\s+)?(?:good|fine|o
 
 function looksLikeApproval(text: string): boolean {
 	return !text.trim() || APPROVAL_PHRASES.test(text);
+}
+
+async function askPlanGenerationFallback(scope: string): Promise<'retry' | 'proceed' | 'abort'> {
+	console.log(chalk.yellow(`  Could not generate a plan for ${scope}.`));
+	const choice = await askUserChoice('How would you like to proceed?', [
+		{ id: 'retry', label: 'Retry plan generation' },
+		{ id: 'proceed', label: 'Proceed without a pre-approved plan' },
+		{ id: 'abort', label: 'Abort this run' },
+	]);
+	if (choice === 'abort') return 'abort';
+	if (choice === 'retry') return 'retry';
+	return 'proceed';
 }
 
 async function reviewTodoPlan(
@@ -2548,27 +2577,11 @@ async function generateCustomTodoPlan(
 		modifications ? `\nUser requested modifications:\n${modifications}` : '',
 	].filter(Boolean).join('\n');
 
-	try {
-		let stdout = '';
-		if (preflightAgent === 'copilot') {
-			({ stdout } = await execFileAsync('copilot', ['-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else if (preflightAgent === 'cursor') {
-			({ stdout } = await execFileAsync('cursor', ['agent', '--mode', 'plan', '-p', prompt], { maxBuffer: 5 * 1024 * 1024, timeout: 60_000 }));
-		} else {
-			return null;
-		}
+	const stdout = await runPlanningPrompt(prompt, preflightAgent);
+	if (!stdout) return null;
 
-		const items = stdout
-			.split('\n')
-			.map((line) => line.trim())
-			.filter((line) => line.startsWith('- [ ]'))
-			.map((line) => line.replace(/^- \[ \]\s*/, '').trim())
-			.filter(Boolean);
-
-		return items.length > 0 ? items : null;
-	} catch {
-		return null;
-	}
+	const items = parseChecklistItems(stdout);
+	return items.length > 0 ? items : null;
 }
 
 async function reviewCustomTodoPlan(
@@ -2773,9 +2786,6 @@ async function publishCompletionSummary(
 		if (!text) return;
 
 		await notifySlackStatus(text);
-		await addJiraComment(ticketKey, text).catch(() => {
-			// Jira comment is best-effort; don't fail the completion for it.
-		});
 	} catch {
 		// Summary publishing is best-effort.
 	}
@@ -2900,352 +2910,360 @@ export async function launchAgentForRepos(
 
 	try {
 
-	const firstRepoContributing = await readContributing(paths[0]);
-	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
-	const clarifications = formatClarifications(preflight);
-	const referenceRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
+		const firstRepoContributing = await readContributing(paths[0]);
+		const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
+		const clarifications = formatClarifications(preflight);
+		const referenceRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
 
-	if (referenceRepoPaths.length) {
-		console.log(chalk.green(`  ✓ ${referenceRepoPaths.length} reference repo(s) will be shared with the agent:`));
-		for (const rp of referenceRepoPaths) {
-			console.log(chalk.gray(`    → ${rp}`));
+		if (referenceRepoPaths.length) {
+			console.log(chalk.green(`  ✓ ${referenceRepoPaths.length} reference repo(s) will be shared with the agent:`));
+			for (const rp of referenceRepoPaths) {
+				console.log(chalk.gray(`    → ${rp}`));
+			}
 		}
-	}
 
-	if (paths.length > 1) {
-		await promptMultiRepoBranchStrategy(paths, detail.key.toUpperCase());
-	}
+		if (paths.length > 1) {
+			await promptMultiRepoBranchStrategy(paths, detail.key.toUpperCase());
+		}
 
-	const figmaSection = await fetchFigmaDesignContext(detail);
-	const jiraUrl = getJiraBrowseUrl(detail);
+		const figmaSection = await fetchFigmaDesignContext(detail);
+		const jiraUrl = getJiraBrowseUrl(detail);
 
-	// ── Ticket mode classification ────────────────────────────────────────
-	const ticketMode = classifyTicketMode(detail);
-	const issueTypeLabel = getIssueTypeName(detail) || 'Ticket';
+		// ── Ticket mode classification ────────────────────────────────────────
+		const ticketMode = classifyTicketMode(detail);
+		const issueTypeLabel = getIssueTypeName(detail) || 'Ticket';
 
-	if (ticketMode.mode === 'manual') {
-		console.log(chalk.gray('\n  Analyzing ticket for manual steps...'));
-		const steps = await generateManualSteps(detail);
-		displayManualSteps(detail, ticketMode.reason, ticketMode.indicators, steps);
+		if (ticketMode.mode === 'manual') {
+			console.log(chalk.gray('\n  Analyzing ticket for manual steps...'));
+			const steps = await generateManualSteps(detail);
+			displayManualSteps(detail, ticketMode.reason, ticketMode.indicators, steps);
 
-		const manualChoice = await askUserChoice(
-			`${detail.key} requires manual changes. How would you like to proceed?`,
-			[
-				{ id: 'stop', label: 'Stop here — I will perform the manual steps myself' },
-				{ id: 'proceed', label: 'Proceed anyway — have the agent attempt this ticket' },
-			],
-		);
+			const manualChoice = await askUserChoice(
+				`${detail.key} requires manual changes. How would you like to proceed?`,
+				[
+					{ id: 'stop', label: 'Stop here — I will perform the manual steps myself' },
+					{ id: 'proceed', label: 'Proceed anyway — have the agent attempt this ticket' },
+				],
+			);
 
-		if (manualChoice === 'stop') {
-			console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
-			console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
-			await updateJob(detail.key, { status: 'stopped', finishedAt: new Date().toISOString() });
+			if (manualChoice === 'stop') {
+				console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
+				console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
+				await updateJob(detail.key, { status: 'stopped', finishedAt: new Date().toISOString() });
+				return;
+			}
+			console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
+		}
+
+		if (ticketMode.mode === 'plan') {
+			console.log(chalk.bold.cyan(`\n  📋 Plan Mode — ${issueTypeLabel}: ${detail.key}`));
+			console.log(chalk.gray(`  ${ticketMode.reason}\n`));
+
+			console.log(chalk.gray('  Generating research/investigation plan...'));
+			let researchItems = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', clarifications);
+
+			if (researchItems.length === 0) {
+				console.log(chalk.yellow('  Could not auto-generate research plan. Agent will explore freely.'));
+			}
+
+			let planApproved = false;
+			const maxPlanRounds = 5;
+			for (let round = 0; round < maxPlanRounds && !planApproved; round++) {
+				console.log(chalk.bold.cyan(`\n  Research plan for ${detail.key}:\n`));
+				if (researchItems.length > 0) {
+					for (let i = 0; i < researchItems.length; i++) {
+						console.log(chalk.white(`  ${i + 1}. ${researchItems[i]}`));
+					}
+				} else {
+					console.log(chalk.gray('  (no specific research items — agent will explore freely)'));
+				}
+				console.log('');
+
+				const planChoice = await askUserChoice('What would you like to do?', [
+					{ id: 'approve', label: 'Looks good — start the spike investigation' },
+					{ id: 'modify', label: 'Modify the research plan' },
+					{ id: 'skip', label: 'Skip plan review — let the agent decide' },
+				]);
+
+				if (planChoice === 'approve' || planChoice === 'skip') {
+					planApproved = true;
+				} else if (planChoice === 'modify') {
+					const mod = await askUser(chalk.cyan('  What should be changed? '));
+					if (mod) {
+						const updated = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', `${clarifications}\n${mod}`);
+						if (updated.length > 0) researchItems = updated;
+						else console.log(chalk.yellow('  Could not regenerate. Keeping current plan.'));
+					}
+				}
+			}
+
+			await transitionIssueToInProgress(detail);
+			await notifySlackStatus(`ForgePilot started ${agentOption.label} for spike ${detail.key}.`);
+
+			for (const repoPath of paths) {
+				let axonChild: ReturnType<typeof startAxonWatch> = null;
+				try {
+					console.log(chalk.bold(`\nPreparing ${repoPath} for spike ${detail.key}...`));
+					const effectivePath = await prepareRepoForWork(repoPath, detail.key, true, detail);
+					const repoContributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
+					logAxonStatus(effectivePath);
+					axonChild = startAxonWatch(effectivePath);
+					const spikePrompt = buildSpikePrompt(detail, repoContributing ?? '', clarifications, researchItems);
+					console.log(chalk.bold(`\nRunning ${agentOption.label} in spike/plan mode in ${effectivePath}...`));
+					await dispatchAgent(agentOption, spikePrompt, effectivePath, jiraUrl, referenceRepoPaths);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					await notifySlackStatus(`ForgePilot error for spike ${detail.key}: ${message}.`);
+					throw error;
+				} finally {
+					stopAxonWatch(axonChild);
+				}
+			}
+
+			const spikeSummary = await reviewAndIterateLoop(
+				detail,
+				agentOption,
+				paths,
+				jiraUrl,
+				referenceRepoPaths,
+				firstRepoContributing ?? undefined,
+				clarifications,
+			);
+			if (spikeSummary) {
+				await notifySlackStatus(spikeSummary);
+			}
+			await notifySlackStatus(`ForgePilot completed spike investigation for ${detail.key}.`);
+			await updateJob(detail.key, { status: 'done', finishedAt: new Date().toISOString() });
 			return;
 		}
-		console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
-	}
 
-	if (ticketMode.mode === 'plan') {
-		console.log(chalk.bold.cyan(`\n  📋 Plan Mode — ${issueTypeLabel}: ${detail.key}`));
-		console.log(chalk.gray(`  ${ticketMode.reason}\n`));
+		// ── Code mode: fall through to normal plan/implement flow ─────────────
+		void issueTypeLabel; // used in manual/plan branches above
 
-		console.log(chalk.gray('  Generating research/investigation plan...'));
-		let researchItems = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', clarifications);
+		let preApprovedPlan = false;
+		let approvedTodoItems: string[] = [];
+		let existingPlanContinue = false;
+		let userModifications: string | undefined;
+		let planReviewModifications: string | undefined;
 
-		if (researchItems.length === 0) {
-			console.log(chalk.yellow('  Could not auto-generate research plan. Agent will explore freely.'));
+		const existingPlan = await handleExistingPlan(detail.key, paths);
+		if (existingPlan.choice === 'continue') {
+			existingPlanContinue = true;
+		} else {
+			const modifications = existingPlan.choice === 'modify'
+				? await askUser(chalk.cyan('  What should be changed? '))
+				: undefined;
+			userModifications = modifications;
+
+			console.log(chalk.gray('\n  Generating implementation plan...'));
+			let planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
+			if (!planItems) {
+				const fallback = await askPlanGenerationFallback(detail.key);
+				if (fallback === 'retry') {
+					console.log(chalk.gray('  Retrying plan generation...'));
+					planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
+				}
+				if (!planItems && fallback === 'abort') {
+					throw new Error(`Aborted before execution for ${detail.key}.`);
+				}
+			}
+			if (planItems) {
+				const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
+				if (result.action === 'approve') {
+					approvedTodoItems = result.approved;
+					preApprovedPlan = true;
+				}
+				planReviewModifications = result.lastModifications;
+			} else {
+				console.log(chalk.gray('  Proceeding without a pre-approved plan.'));
+			}
 		}
 
-		let planApproved = false;
-		const maxPlanRounds = 5;
-		for (let round = 0; round < maxPlanRounds && !planApproved; round++) {
-			console.log(chalk.bold.cyan(`\n  Research plan for ${detail.key}:\n`));
-			if (researchItems.length > 0) {
-				for (let i = 0; i < researchItems.length; i++) {
-					console.log(chalk.white(`  ${i + 1}. ${researchItems[i]}`));
-				}
-			} else {
-				console.log(chalk.gray('  (no specific research items — agent will explore freely)'));
-			}
-			console.log('');
+		const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
+			?? extractBaseBranchOverride(userModifications ?? '')
+			?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
+			?? extractBaseBranchOverride(getDescriptionText(detail))
+			?? extractBaseBranchOverride(commentsText(detail));
+		if (baseBranchOverride) {
+			console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
+		}
 
-			const planChoice = await askUserChoice('What would you like to do?', [
-				{ id: 'approve', label: 'Looks good — start the spike investigation' },
-				{ id: 'modify', label: 'Modify the research plan' },
-				{ id: 'skip', label: 'Skip plan review — let the agent decide' },
-			]);
-
-			if (planChoice === 'approve' || planChoice === 'skip') {
-				planApproved = true;
-			} else if (planChoice === 'modify') {
-				const mod = await askUser(chalk.cyan('  What should be changed? '));
-				if (mod) {
-					const updated = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', `${clarifications}\n${mod}`);
-					if (updated.length > 0) researchItems = updated;
-					else console.log(chalk.yellow('  Could not regenerate. Keeping current plan.'));
-				}
-			}
+		const parallelThreshold = 4;
+		let useParallelSubAgents = false;
+		if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
+			const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
+			useParallelSubAgents = true;
+			console.log(chalk.cyan(`  ⚡ Spawning ${agentCount} parallel agents for ${approvedTodoItems.length} tasks.`));
 		}
 
 		await transitionIssueToInProgress(detail);
-		await notifySlackStatus(`ForgePilot started ${agentOption.label} for spike ${detail.key}.`);
+		await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).${useParallelSubAgents ? ' (parallel mode)' : ''}`);
+
+		const completedEffectivePaths: string[] = [];
 
 		for (const repoPath of paths) {
 			let axonChild: ReturnType<typeof startAxonWatch> = null;
 			try {
-				console.log(chalk.bold(`\nPreparing ${repoPath} for spike ${detail.key}...`));
-				const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
-				const repoContributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
+				console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
+				const effectivePath = await prepareRepoForWork(repoPath, detail.key, true, detail, baseBranchOverride ?? undefined);
+
+				const ticketTitle = String(detail.fields.summary ?? detail.key);
+				const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
+
+				let resumeMode = existingPlanContinue;
+				if (!resumeMode && !reviewMode) {
+					({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
+				}
+
+				if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
+					const todoPath = todoFilePath(effectivePath, detail.key);
+					const todoContent = [
+						`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
+						'',
+						...approvedTodoItems.map((item) => `- [ ] ${item}`),
+						'',
+					].join('\n');
+					await fs.writeFile(todoPath, todoContent, 'utf8');
+					console.log(chalk.green(`  ✓ Pre-approved plan written to ${path.basename(todoPath)}`));
+				}
+
+				const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
+				if (contributing) {
+					console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${effectivePath}`));
+				}
+
+				const axonHint = getAxonPromptHint(effectivePath);
 				logAxonStatus(effectivePath);
 				axonChild = startAxonWatch(effectivePath);
-				const spikePrompt = buildSpikePrompt(detail, repoContributing ?? '', clarifications, researchItems);
-				console.log(chalk.bold(`\nRunning ${agentOption.label} in spike/plan mode in ${effectivePath}...`));
-				await dispatchAgent(agentOption, spikePrompt, effectivePath, jiraUrl, referenceRepoPaths);
+
+				// --- Parallel sub-agent path ---
+				if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
+					const { results: subResults, branchAnalyses, totalConflicts } = await dispatchParallelSubAgents(
+						detail,
+						agentOption,
+						approvedTodoItems,
+						effectivePath,
+						jiraUrl,
+						contributing,
+						clarifications,
+						axonHint,
+						figmaSection,
+						referenceRepoPaths,
+					);
+
+					const failedSubs = subResults.filter((r) => r.status === 'failed');
+					if (failedSubs.length > 0) {
+						console.log(chalk.yellow(`\n  ${failedSubs.length} sub-agent(s) failed. Check logs for details:`));
+						for (const f of failedSubs) {
+							console.log(chalk.gray(`    Sub-agent ${f.index + 1}: ${f.logFile}`));
+						}
+					}
+
+					// Ask user about retrying incomplete work (foreground only)
+					await promptRetryIncomplete(
+						detail,
+						agentOption,
+						totalConflicts,
+						failedSubs,
+						branchAnalyses,
+						effectivePath,
+						jiraUrl,
+						contributing,
+						clarifications,
+						axonHint,
+						figmaSection,
+						referenceRepoPaths,
+					);
+
+					await notifySlackStatus(
+						`ForgePilot parallel execution for ${detail.key}: ${subResults.filter((r) => r.status === 'done').length}/${subResults.length} sub-agents succeeded.`,
+					);
+				} else {
+					// --- Standard single-agent path ---
+					let priorAnswers = '';
+					const maxQaRounds = 5;
+					const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
+
+					for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
+						const isResume = resumeMode && qaRound === 0;
+						const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
+
+						await saveCheckpoint(detail.key, {
+							ticketKey: detail.key,
+							agentId: agentOption.id,
+							agentLabel: agentOption.label,
+							repoPath,
+							effectivePath,
+							startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+							lastUpdatedAt: new Date().toISOString(),
+						});
+
+						console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ${isResume ? '(resuming from checkpoint) ' : ''}...`));
+						await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+
+						const questions = await readQuestionsFile(effectivePath, detail.key);
+						if (!questions) break;
+
+						console.log(chalk.yellow(`\n  Agent paused with ${questions.length} question(s). Routing for answers...`));
+						const qaPairs = await routeQuestions(questions, detail.key);
+						await writeAnswersFile(effectivePath, detail.key, qaPairs);
+
+						const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
+						priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
+
+						await notifySlackStatus(`ForgePilot re-launching ${agentOption.label} for ${detail.key} after answering ${questions.length} question(s).`);
+					}
+				}
+
+				completedEffectivePaths.push(effectivePath);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				await notifySlackStatus(`ForgePilot error for spike ${detail.key}: ${message}.`);
+				console.log(chalk.yellow(`  Checkpoint preserved for ${detail.key}. Resume on next run.`));
+				await notifySlackStatus(
+					`ForgePilot error for ${detail.key} in ${repoPath} using ${agentOption.label}: ${message}. Checkpoint preserved for resume.`,
+				);
 				throw error;
 			} finally {
 				stopAxonWatch(axonChild);
 			}
 		}
 
-		const spikeSummary = await reviewAndIterateLoop(
+		await automatedCompletionVerificationLoop(
 			detail,
 			agentOption,
-			paths,
+			completedEffectivePaths,
 			jiraUrl,
 			referenceRepoPaths,
 			firstRepoContributing ?? undefined,
 			clarifications,
 		);
-		if (spikeSummary) {
-			await notifySlackStatus(spikeSummary);
-			await addJiraComment(detail.key, spikeSummary).catch(() => {});
+
+		// Interactive review-and-iterate loop — show AI summary, let user request more work
+		const finalSummary = await reviewAndIterateLoop(
+			detail,
+			agentOption,
+			completedEffectivePaths,
+			jiraUrl,
+			referenceRepoPaths,
+			firstRepoContributing ?? undefined,
+			clarifications,
+		);
+
+		// Publish the final summary to Slack
+		if (finalSummary) {
+			await notifySlackStatus(finalSummary);
 		}
-		await notifySlackStatus(`ForgePilot completed spike investigation for ${detail.key}.`);
-		await updateJob(detail.key, { status: 'done', finishedAt: new Date().toISOString() });
-		return;
-	}
-
-	// ── Code mode: fall through to normal plan/implement flow ─────────────
-	void issueTypeLabel; // used in manual/plan branches above
-
-	let preApprovedPlan = false;
-	let approvedTodoItems: string[] = [];
-	let existingPlanContinue = false;
-	let userModifications: string | undefined;
-	let planReviewModifications: string | undefined;
-
-	const existingPlan = await handleExistingPlan(detail.key, paths);
-	if (existingPlan.choice === 'continue') {
-		existingPlanContinue = true;
-	} else {
-		const modifications = existingPlan.choice === 'modify'
-			? await askUser(chalk.cyan('  What should be changed? '))
-			: undefined;
-		userModifications = modifications;
-
-		console.log(chalk.gray('\n  Generating implementation plan...'));
-		const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
-		if (planItems) {
-			const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
-			if (result.action === 'approve') {
-				approvedTodoItems = result.approved;
-				preApprovedPlan = true;
-			}
-			planReviewModifications = result.lastModifications;
-		} else {
-			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		for (const effectivePath of completedEffectivePaths) {
+			await cleanupTodoFiles(effectivePath);
+			await cleanupQuestionFiles(effectivePath);
 		}
-	}
+		await clearCheckpoint(detail.key);
+		await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
 
-	const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
-		?? extractBaseBranchOverride(userModifications ?? '')
-		?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
-		?? extractBaseBranchOverride(getDescriptionText(detail))
-		?? extractBaseBranchOverride(commentsText(detail));
-	if (baseBranchOverride) {
-		console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
-	}
-
-	const parallelThreshold = 4;
-	let useParallelSubAgents = false;
-	if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
-		const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
-		useParallelSubAgents = true;
-		console.log(chalk.cyan(`  ⚡ Spawning ${agentCount} parallel agents for ${approvedTodoItems.length} tasks.`));
-	}
-
-	await transitionIssueToInProgress(detail);
-	await notifySlackStatus(`ForgePilot started ${agentOption.label} for ${detail.key} across ${paths.length} repo(s).${useParallelSubAgents ? ' (parallel mode)' : ''}`);
-
-	const completedEffectivePaths: string[] = [];
-
-	for (const repoPath of paths) {
-		let axonChild: ReturnType<typeof startAxonWatch> = null;
-		try {
-			console.log(chalk.bold(`\nPreparing ${repoPath} for ${detail.key}...`));
-			const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail, baseBranchOverride ?? undefined);
-
-			const ticketTitle = String(detail.fields.summary ?? detail.key);
-			const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
-
-			let resumeMode = existingPlanContinue;
-			if (!resumeMode && !reviewMode) {
-				({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
-			}
-
-			if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
-				const todoPath = todoFilePath(effectivePath, detail.key);
-				const todoContent = [
-					`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
-					'',
-					...approvedTodoItems.map((item) => `- [ ] ${item}`),
-					'',
-				].join('\n');
-				await fs.writeFile(todoPath, todoContent, 'utf8');
-				console.log(chalk.green(`  ✓ Pre-approved plan written to ${path.basename(todoPath)}`));
-			}
-
-			const contributing = repoPath === paths[0] ? firstRepoContributing : await readContributing(effectivePath);
-			if (contributing) {
-				console.log(chalk.gray(`  Found CONTRIBUTING.md / AGENTS.md in ${effectivePath}`));
-			}
-
-			const axonHint = getAxonPromptHint(effectivePath);
-			logAxonStatus(effectivePath);
-			axonChild = startAxonWatch(effectivePath);
-
-			// --- Parallel sub-agent path ---
-			if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
-				const { results: subResults, branchAnalyses, totalConflicts } = await dispatchParallelSubAgents(
-					detail,
-					agentOption,
-					approvedTodoItems,
-					effectivePath,
-					jiraUrl,
-					contributing,
-					clarifications,
-					axonHint,
-					figmaSection,
-					referenceRepoPaths,
-				);
-
-				const failedSubs = subResults.filter((r) => r.status === 'failed');
-				if (failedSubs.length > 0) {
-					console.log(chalk.yellow(`\n  ${failedSubs.length} sub-agent(s) failed. Check logs for details:`));
-					for (const f of failedSubs) {
-						console.log(chalk.gray(`    Sub-agent ${f.index + 1}: ${f.logFile}`));
-					}
-				}
-
-				// Ask user about retrying incomplete work (foreground only)
-				await promptRetryIncomplete(
-					detail,
-					agentOption,
-					totalConflicts,
-					failedSubs,
-					branchAnalyses,
-					effectivePath,
-					jiraUrl,
-					contributing,
-					clarifications,
-					axonHint,
-					figmaSection,
-					referenceRepoPaths,
-				);
-
-				await notifySlackStatus(
-					`ForgePilot parallel execution for ${detail.key}: ${subResults.filter((r) => r.status === 'done').length}/${subResults.length} sub-agents succeeded.`,
-				);
-			} else {
-				// --- Standard single-agent path ---
-				let priorAnswers = '';
-				const maxQaRounds = 5;
-				const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
-
-				for (let qaRound = 0; qaRound < maxQaRounds; qaRound++) {
-					const isResume = resumeMode && qaRound === 0;
-					const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, priorAnswers, isResume, reviewMode && qaRound === 0 ? reviewComments : [], usePreApproved && qaRound === 0);
-
-					await saveCheckpoint(detail.key, {
-						ticketKey: detail.key,
-						agentId: agentOption.id,
-						agentLabel: agentOption.label,
-						repoPath,
-						effectivePath,
-						startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
-						lastUpdatedAt: new Date().toISOString(),
-					});
-
-					console.log(chalk.bold(`\nRunning ${agentOption.label} in ${effectivePath} ${isResume ? '(resuming from checkpoint) ' : ''}...`));
-					await dispatchAgent(agentOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
-
-					const questions = await readQuestionsFile(effectivePath, detail.key);
-					if (!questions) break;
-
-					console.log(chalk.yellow(`\n  Agent paused with ${questions.length} question(s). Routing for answers...`));
-					const qaPairs = await routeQuestions(questions, detail.key);
-					await writeAnswersFile(effectivePath, detail.key, qaPairs);
-
-					const newAnswers = qaPairs.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join('\n\n');
-					priorAnswers = priorAnswers ? `${priorAnswers}\n\n${newAnswers}` : newAnswers;
-
-					await notifySlackStatus(`ForgePilot re-launching ${agentOption.label} for ${detail.key} after answering ${questions.length} question(s).`);
-				}
-			}
-
-			completedEffectivePaths.push(effectivePath);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			console.log(chalk.yellow(`  Checkpoint preserved for ${detail.key}. Resume on next run.`));
-			await notifySlackStatus(
-				`ForgePilot error for ${detail.key} in ${repoPath} using ${agentOption.label}: ${message}. Checkpoint preserved for resume.`,
-			);
-			throw error;
-		} finally {
-			stopAxonWatch(axonChild);
-		}
-	}
-
-	await automatedCompletionVerificationLoop(
-		detail,
-		agentOption,
-		completedEffectivePaths,
-		jiraUrl,
-		referenceRepoPaths,
-		firstRepoContributing ?? undefined,
-		clarifications,
-	);
-
-	// Interactive review-and-iterate loop — show AI summary, let user request more work
-	const finalSummary = await reviewAndIterateLoop(
-		detail,
-		agentOption,
-		completedEffectivePaths,
-		jiraUrl,
-		referenceRepoPaths,
-		firstRepoContributing ?? undefined,
-		clarifications,
-	);
-
-	// Publish the final summary to Slack + Jira
-	if (finalSummary) {
-		await notifySlackStatus(finalSummary);
-		await addJiraComment(detail.key, finalSummary).catch(() => {});
-	}
-	for (const effectivePath of completedEffectivePaths) {
-		await cleanupTodoFiles(effectivePath);
-		await cleanupQuestionFiles(effectivePath);
-	}
-	await clearCheckpoint(detail.key);
-	await notifySlackStatus(`ForgePilot completed ${agentOption.label} for ${detail.key} successfully.`);
-
-	await updateJob(detail.key, {
-		status: 'done',
-		finishedAt: new Date().toISOString(),
-	});
+		await updateJob(detail.key, {
+			status: 'done',
+			finishedAt: new Date().toISOString(),
+		});
 
 	} catch (error) {
 		await updateJob(detail.key, {
@@ -3281,171 +3299,249 @@ export async function launchAgentInBackground(
 
 	try {
 
-	const firstRepoContributing = await readContributing(paths[0]);
-	const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
-	const clarifications = formatClarifications(preflight);
-	const referenceRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
+		const firstRepoContributing = await readContributing(paths[0]);
+		const preflight = await runPreflightChecks(detail, !!firstRepoContributing);
+		const clarifications = formatClarifications(preflight);
+		const referenceRepoPaths = preflight.referenceRepoPaths.filter((p) => !paths.includes(p));
 
-	const figmaSection = await fetchFigmaDesignContext(detail);
-	const jiraUrl = getJiraBrowseUrl(detail);
+		const figmaSection = await fetchFigmaDesignContext(detail);
+		const jiraUrl = getJiraBrowseUrl(detail);
 
-	// ── Ticket mode classification ────────────────────────────────────────
-	const bgTicketMode = classifyTicketMode(detail);
-	const bgIssueTypeLabel = getIssueTypeName(detail) || 'Ticket';
+		// ── Ticket mode classification ────────────────────────────────────────
+		const bgTicketMode = classifyTicketMode(detail);
+		const bgIssueTypeLabel = getIssueTypeName(detail) || 'Ticket';
 
-	if (bgTicketMode.mode === 'manual') {
-		console.log(chalk.gray('\n  Analyzing ticket for manual steps...'));
-		const steps = await generateManualSteps(detail);
-		displayManualSteps(detail, bgTicketMode.reason, bgTicketMode.indicators, steps);
+		if (bgTicketMode.mode === 'manual') {
+			console.log(chalk.gray('\n  Analyzing ticket for manual steps...'));
+			const steps = await generateManualSteps(detail);
+			displayManualSteps(detail, bgTicketMode.reason, bgTicketMode.indicators, steps);
 
-		const manualChoice = await askUserChoice(
-			`${detail.key} requires manual changes. How would you like to proceed?`,
-			[
-				{ id: 'stop', label: 'Stop here — I will perform the manual steps myself' },
-				{ id: 'proceed', label: 'Proceed anyway — have the agent attempt this ticket' },
-			],
-		);
+			const manualChoice = await askUserChoice(
+				`${detail.key} requires manual changes. How would you like to proceed?`,
+				[
+					{ id: 'stop', label: 'Stop here — I will perform the manual steps myself' },
+					{ id: 'proceed', label: 'Proceed anyway — have the agent attempt this ticket' },
+				],
+			);
 
-		if (manualChoice === 'stop') {
-			console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
-			console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
-			throw new Error(`Manual changes required for ${detail.key} — stopped by user.`);
-		}
-		console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
-	}
-
-	if (bgTicketMode.mode === 'plan') {
-		console.log(chalk.bold.cyan(`\n  📋 Plan Mode — ${bgIssueTypeLabel}: ${detail.key}`));
-		console.log(chalk.gray(`  ${bgTicketMode.reason}\n`));
-
-		console.log(chalk.gray('  Generating research/investigation plan...'));
-		let researchItems = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', clarifications);
-		if (researchItems.length === 0) {
-			console.log(chalk.yellow('  Could not auto-generate research plan. Agent will explore freely.'));
+			if (manualChoice === 'stop') {
+				console.log(chalk.cyan('\n  Perform the manual steps listed above in your environment.'));
+				console.log(chalk.cyan(`  Remember to update the status of ${detail.key} in Jira once complete.`));
+				throw new Error(`Manual changes required for ${detail.key} — stopped by user.`);
+			}
+			console.log(chalk.yellow('\n  Proceeding with coding agent despite detected manual requirements...\n'));
 		}
 
-		let planApproved = false;
-		const maxPlanRounds = 5;
-		for (let round = 0; round < maxPlanRounds && !planApproved; round++) {
-			console.log(chalk.bold.cyan(`\n  Research plan for ${detail.key}:\n`));
-			if (researchItems.length > 0) {
-				for (let i = 0; i < researchItems.length; i++) {
-					console.log(chalk.white(`  ${i + 1}. ${researchItems[i]}`));
+		if (bgTicketMode.mode === 'plan') {
+			console.log(chalk.bold.cyan(`\n  📋 Plan Mode — ${bgIssueTypeLabel}: ${detail.key}`));
+			console.log(chalk.gray(`  ${bgTicketMode.reason}\n`));
+
+			console.log(chalk.gray('  Generating research/investigation plan...'));
+			let researchItems = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', clarifications);
+			if (researchItems.length === 0) {
+				console.log(chalk.yellow('  Could not auto-generate research plan. Agent will explore freely.'));
+			}
+
+			let planApproved = false;
+			const maxPlanRounds = 5;
+			for (let round = 0; round < maxPlanRounds && !planApproved; round++) {
+				console.log(chalk.bold.cyan(`\n  Research plan for ${detail.key}:\n`));
+				if (researchItems.length > 0) {
+					for (let i = 0; i < researchItems.length; i++) {
+						console.log(chalk.white(`  ${i + 1}. ${researchItems[i]}`));
+					}
+				} else {
+					console.log(chalk.gray('  (no research items — agent will explore freely)'));
 				}
+				console.log('');
+
+				const planChoice = await askUserChoice('What would you like to do?', [
+					{ id: 'approve', label: 'Looks good — start the spike investigation' },
+					{ id: 'modify', label: 'Modify the research plan' },
+					{ id: 'skip', label: 'Skip plan review — let the agent decide' },
+				]);
+
+				if (planChoice === 'approve' || planChoice === 'skip') {
+					planApproved = true;
+				} else if (planChoice === 'modify') {
+					const mod = await askUser(chalk.cyan('  What should be changed? '));
+					if (mod) {
+						const updated = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', `${clarifications}\n${mod}`);
+						if (updated.length > 0) researchItems = updated;
+						else console.log(chalk.yellow('  Could not regenerate. Keeping current plan.'));
+					}
+				}
+			}
+
+			await transitionIssueToInProgress(detail);
+
+			const repoPath = paths[0];
+			const effectivePath = await prepareRepoForWork(repoPath, detail.key, true, detail);
+			const repoContributing = await readContributing(effectivePath);
+			const spikePrompt = buildSpikePrompt(detail, repoContributing ?? '', clarifications, researchItems);
+
+			const { command, args, toolName } = resolveAgentCommand(agentOption, spikePrompt, effectivePath, jiraUrl, referenceRepoPaths);
+			const job = await runCommandBackground(command, args, toolName, detail.key, String(detail.fields.summary ?? detail.key), paths, effectivePath, agentOption.id);
+
+			await notifySlackStatus(`ForgePilot queued ${agentOption.label} for spike ${detail.key} (background).`);
+			return job;
+		}
+
+		// ── Code mode: fall through to normal plan/implement flow ─────────────
+		void bgIssueTypeLabel; // used in manual/plan branches above
+
+		let preApprovedPlan = false;
+		let approvedTodoItems: string[] = [];
+		let existingPlanContinue = false;
+		let userModifications: string | undefined;
+		let planReviewModifications: string | undefined;
+
+		const existingPlanBg = await handleExistingPlan(detail.key, paths);
+		if (existingPlanBg.choice === 'continue') {
+			existingPlanContinue = true;
+		} else {
+			const modifications = existingPlanBg.choice === 'modify'
+				? await askUser(chalk.cyan('  What should be changed? '))
+				: undefined;
+			userModifications = modifications;
+
+			console.log(chalk.gray('\n  Generating implementation plan...'));
+			let planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
+			if (!planItems) {
+				const fallback = await askPlanGenerationFallback(detail.key);
+				if (fallback === 'retry') {
+					console.log(chalk.gray('  Retrying plan generation...'));
+					planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
+				}
+				if (!planItems && fallback === 'abort') {
+					throw new Error(`Aborted before execution for ${detail.key}.`);
+				}
+			}
+			if (planItems) {
+				const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
+				if (result.action === 'approve') {
+					approvedTodoItems = result.approved;
+					preApprovedPlan = true;
+				}
+				planReviewModifications = result.lastModifications;
 			} else {
-				console.log(chalk.gray('  (no research items — agent will explore freely)'));
+				console.log(chalk.gray('  Proceeding without a pre-approved plan.'));
 			}
-			console.log('');
+		}
 
-			const planChoice = await askUserChoice('What would you like to do?', [
-				{ id: 'approve', label: 'Looks good — start the spike investigation' },
-				{ id: 'modify', label: 'Modify the research plan' },
-				{ id: 'skip', label: 'Skip plan review — let the agent decide' },
-			]);
+		const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
+			?? extractBaseBranchOverride(userModifications ?? '')
+			?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
+			?? extractBaseBranchOverride(getDescriptionText(detail))
+			?? extractBaseBranchOverride(commentsText(detail));
+		if (baseBranchOverride) {
+			console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
+		}
 
-			if (planChoice === 'approve' || planChoice === 'skip') {
-				planApproved = true;
-			} else if (planChoice === 'modify') {
-				const mod = await askUser(chalk.cyan('  What should be changed? '));
-				if (mod) {
-					const updated = await generateSpikeResearchPlan(detail, firstRepoContributing ?? '', `${clarifications}\n${mod}`);
-					if (updated.length > 0) researchItems = updated;
-					else console.log(chalk.yellow('  Could not regenerate. Keeping current plan.'));
-				}
-			}
+		const parallelThreshold = 4;
+		let useParallelSubAgents = false;
+		if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
+			const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
+			useParallelSubAgents = true;
+			console.log(chalk.cyan(`  ⚡ Spawning ${agentCount} parallel background agents for ${approvedTodoItems.length} tasks.`));
 		}
 
 		await transitionIssueToInProgress(detail);
 
 		const repoPath = paths[0];
-		const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail);
-		const repoContributing = await readContributing(effectivePath);
-		const spikePrompt = buildSpikePrompt(detail, repoContributing ?? '', clarifications, researchItems);
+		const effectivePath = await prepareRepoForWork(repoPath, detail.key, true, detail, baseBranchOverride ?? undefined);
+		const ticketTitle = String(detail.fields.summary ?? detail.key);
+		const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
 
-		const { command, args, toolName } = resolveAgentCommand(agentOption, spikePrompt, effectivePath, jiraUrl, referenceRepoPaths);
-		const job = await runCommandBackground(command, args, toolName, detail.key, String(detail.fields.summary ?? detail.key), paths, effectivePath, agentOption.id);
-
-		await notifySlackStatus(`ForgePilot queued ${agentOption.label} for spike ${detail.key} (background).`);
-		return job;
-	}
-
-	// ── Code mode: fall through to normal plan/implement flow ─────────────
-	void bgIssueTypeLabel; // used in manual/plan branches above
-
-	let preApprovedPlan = false;
-	let approvedTodoItems: string[] = [];
-	let existingPlanContinue = false;
-	let userModifications: string | undefined;
-	let planReviewModifications: string | undefined;
-
-	const existingPlanBg = await handleExistingPlan(detail.key, paths);
-	if (existingPlanBg.choice === 'continue') {
-		existingPlanContinue = true;
-	} else {
-		const modifications = existingPlanBg.choice === 'modify'
-			? await askUser(chalk.cyan('  What should be changed? '))
-			: undefined;
-		userModifications = modifications;
-
-		console.log(chalk.gray('\n  Generating implementation plan...'));
-		const planItems = await generateTodoPlan(detail, firstRepoContributing ?? '', clarifications, modifications);
-		if (planItems) {
-			const result = await reviewTodoPlan(planItems, detail, firstRepoContributing ?? '', clarifications);
-			if (result.action === 'approve') {
-				approvedTodoItems = result.approved;
-				preApprovedPlan = true;
-			}
-			planReviewModifications = result.lastModifications;
-		} else {
-			console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		let resumeMode = existingPlanContinue;
+		if (!resumeMode && !reviewMode) {
+			({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
 		}
-	}
 
-	const baseBranchOverride = extractBaseBranchOverride(planReviewModifications ?? '')
-		?? extractBaseBranchOverride(userModifications ?? '')
-		?? extractBaseBranchOverride(approvedTodoItems.join('\n'))
-		?? extractBaseBranchOverride(getDescriptionText(detail))
-		?? extractBaseBranchOverride(commentsText(detail));
-	if (baseBranchOverride) {
-		console.log(chalk.green(`  ✓ Base branch override detected: ${baseBranchOverride}`));
-	}
+		if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
+			const todoPath = todoFilePath(effectivePath, detail.key);
+			const todoContent = [
+				`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
+				'',
+				...approvedTodoItems.map((item) => `- [ ] ${item}`),
+				'',
+			].join('\n');
+			await fs.writeFile(todoPath, todoContent, 'utf8');
+		}
 
-	const parallelThreshold = 4;
-	let useParallelSubAgents = false;
-	if (preApprovedPlan && approvedTodoItems.length >= parallelThreshold && !existingPlanContinue) {
-		const agentCount = Math.min(getParallelSubAgentCount(), approvedTodoItems.length);
-		useParallelSubAgents = true;
-		console.log(chalk.cyan(`  ⚡ Spawning ${agentCount} parallel background agents for ${approvedTodoItems.length} tasks.`));
-	}
+		const contributing = await readContributing(effectivePath);
+		const axonHint = getAxonPromptHint(effectivePath);
 
-	await transitionIssueToInProgress(detail);
+		// --- Parallel sub-agent foreground path (waits for completion) ---
+		if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
+			let effectiveOption = agentOption;
+			if (agentOption.id === 'ollama-local') {
+				await ensureOllamaServing();
+				const model = await pickOllamaModel();
+				if (!model) throw new Error('No Ollama model selected.');
+				effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
+			}
 
-	const repoPath = paths[0];
-	const effectivePath = await prepareRepoForWork(repoPath, detail.key, false, detail, baseBranchOverride ?? undefined);
-	const ticketTitle = String(detail.fields.summary ?? detail.key);
-	const { reviewMode, reviewComments } = await handleReviewDetection(effectivePath, detail.key, ticketTitle);
+			const { results: subResults, totalConflicts, branchAnalyses } = await dispatchParallelSubAgents(
+				detail,
+				effectiveOption,
+				approvedTodoItems,
+				effectivePath,
+				jiraUrl,
+				contributing,
+				clarifications,
+				axonHint,
+				figmaSection,
+				referenceRepoPaths,
+			);
 
-	let resumeMode = existingPlanContinue;
-	if (!resumeMode && !reviewMode) {
-		({ resumeMode } = await handleCheckpointResume(effectivePath, detail.key));
-	}
+			startAxonWatch(effectivePath);
 
-	if (preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length > 0) {
-		const todoPath = todoFilePath(effectivePath, detail.key);
-		const todoContent = [
-			`# ${detail.key}: ${detail.fields.summary ?? detail.key}`,
-			'',
-			...approvedTodoItems.map((item) => `- [ ] ${item}`),
-			'',
-		].join('\n');
-		await fs.writeFile(todoPath, todoContent, 'utf8');
-	}
+			const doneCount = subResults.filter((r) => r.status === 'done').length;
+			const failedCount = subResults.filter((r) => r.status === 'failed').length;
+			const hasIncomplete = totalConflicts.length > 0 || failedCount > 0 || branchAnalyses.some((a) => a.hasUncommittedChanges);
 
-	const contributing = await readContributing(effectivePath);
-	const axonHint = getAxonPromptHint(effectivePath);
+			await publishCompletionSummary(detail.key, [effectivePath], effectiveOption);
+			await notifySlackStatus(
+				`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.${hasIncomplete ? ' Some work may be incomplete — review needed.' : ''}`,
+			);
 
-	// --- Parallel sub-agent foreground path (waits for completion) ---
-	if (useParallelSubAgents && preApprovedPlan && !resumeMode && !reviewMode && approvedTodoItems.length >= 2) {
+			// Register a summary job so the ticket list shows completion status
+			const summaryJob: JobRecord = {
+				id: detail.key,
+				ticketKey: detail.key,
+				title: ticketTitle,
+				agent: effectiveOption.label,
+				agentOptionId: effectiveOption.id,
+				pid: process.pid,
+				logFile: '',
+				status: failedCount === 0 ? 'done' : 'failed',
+				startedAt: new Date().toISOString(),
+				finishedAt: new Date().toISOString(),
+				repos: paths,
+				effectivePaths: [effectivePath],
+			};
+			await registerJob(summaryJob);
+
+			return summaryJob;
+		}
+
+		// --- Standard single-agent background path ---
+		const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
+		const isResume = resumeMode;
+
+		const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, '', isResume, reviewMode ? reviewComments : [], usePreApproved);
+
+		await saveCheckpoint(detail.key, {
+			ticketKey: detail.key,
+			agentId: agentOption.id,
+			agentLabel: agentOption.label,
+			repoPath,
+			effectivePath,
+			startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
+			lastUpdatedAt: new Date().toISOString(),
+		});
+
 		let effectiveOption = agentOption;
 		if (agentOption.id === 'ollama-local') {
 			await ensureOllamaServing();
@@ -3454,92 +3550,24 @@ export async function launchAgentInBackground(
 			effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
 		}
 
-		const { results: subResults, totalConflicts, branchAnalyses } = await dispatchParallelSubAgents(
-			detail,
-			effectiveOption,
-			approvedTodoItems,
+		const { command, args, toolName } = resolveAgentCommand(effectiveOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
+
+		const job = await runCommandBackground(
+			command,
+			args,
+			toolName,
+			detail.key,
+			ticketTitle,
+			paths,
 			effectivePath,
-			jiraUrl,
-			contributing,
-			clarifications,
-			axonHint,
-			figmaSection,
-			referenceRepoPaths,
+			effectiveOption.id,
 		);
 
 		startAxonWatch(effectivePath);
 
-		const doneCount = subResults.filter((r) => r.status === 'done').length;
-		const failedCount = subResults.filter((r) => r.status === 'failed').length;
-		const hasIncomplete = totalConflicts.length > 0 || failedCount > 0 || branchAnalyses.some((a) => a.hasUncommittedChanges);
+		await notifySlackStatus(`ForgePilot started ${effectiveOption.label} for ${detail.key} in background (PID ${job.pid}).`);
 
-		await publishCompletionSummary(detail.key, [effectivePath], effectiveOption);
-		await notifySlackStatus(
-			`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.${hasIncomplete ? ' Some work may be incomplete — review needed.' : ''}`,
-		);
-
-		// Register a summary job so the ticket list shows completion status
-		const summaryJob: JobRecord = {
-			id: detail.key,
-			ticketKey: detail.key,
-			title: ticketTitle,
-			agent: effectiveOption.label,
-			agentOptionId: effectiveOption.id,
-			pid: process.pid,
-			logFile: '',
-			status: failedCount === 0 ? 'done' : 'failed',
-			startedAt: new Date().toISOString(),
-			finishedAt: new Date().toISOString(),
-			repos: paths,
-			effectivePaths: [effectivePath],
-		};
-		await registerJob(summaryJob);
-
-		return summaryJob;
-	}
-
-	// --- Standard single-agent background path ---
-	const usePreApproved = preApprovedPlan && !resumeMode && !reviewMode;
-	const isResume = resumeMode;
-
-	const prompt = buildWorkPrompt(detail, contributing, clarifications, axonHint, figmaSection, '', isResume, reviewMode ? reviewComments : [], usePreApproved);
-
-	await saveCheckpoint(detail.key, {
-		ticketKey: detail.key,
-		agentId: agentOption.id,
-		agentLabel: agentOption.label,
-		repoPath,
-		effectivePath,
-		startedAt: (await loadCheckpoint(detail.key))?.startedAt ?? new Date().toISOString(),
-		lastUpdatedAt: new Date().toISOString(),
-	});
-
-	let effectiveOption = agentOption;
-	if (agentOption.id === 'ollama-local') {
-		await ensureOllamaServing();
-		const model = await pickOllamaModel();
-		if (!model) throw new Error('No Ollama model selected.');
-		effectiveOption = { ...agentOption, ollamaModel: model } as WorkAgentOption & { ollamaModel: string };
-	}
-
-	const { command, args, toolName } = resolveAgentCommand(effectiveOption, prompt, effectivePath, jiraUrl, referenceRepoPaths);
-
-	const job = await runCommandBackground(
-		command,
-		args,
-		toolName,
-		detail.key,
-		ticketTitle,
-		paths,
-		effectivePath,
-		effectiveOption.id,
-	);
-
-	startAxonWatch(effectivePath);
-
-	await notifySlackStatus(`ForgePilot started ${effectiveOption.label} for ${detail.key} in background (PID ${job.pid}).`);
-
-	return job;
+		return job;
 
 	} catch (error) {
 		await updateJob(detail.key, {
@@ -3582,35 +3610,7 @@ export async function launchMultipleTickets(
 	}
 	onStatusChange(statuses);
 
-	const hasWorktreeNeeds = [...resolutions.values()].some((r) => r.needsWorktree.size > 0);
-	let useSingleBranch = false;
-
-	if (hasWorktreeNeeds) {
-		const ticketKeys = details.map((d) => d.key).join(', ');
-		console.log(chalk.cyan(`\n  Multiple tickets (${ticketKeys}) share the same repo(s).`));
-
-		if (isVoiceModeActive()) {
-			printAndSpeak('These tickets share repos. Should all work go into a single branch, or separate branches?');
-		}
-
-		const choice = await askUserChoice(
-			'Branch strategy for shared repos:',
-			[
-				{ id: 'single', label: `Single branch — all work on "${details[0].key.toUpperCase()}", run sequentially` },
-				{ id: 'separate', label: 'Separate branches per ticket — run in parallel with worktrees' },
-			],
-		);
-
-		if (choice === 'single') {
-			useSingleBranch = true;
-			for (const resolution of resolutions.values()) {
-				resolution.needsWorktree.clear();
-			}
-			console.log(chalk.green(`  ✓ All work will go into branch "${details[0].key.toUpperCase()}", running sequentially.`));
-		} else {
-			console.log(chalk.green('  ✓ Each ticket gets its own branch. Running in parallel with worktrees.'));
-		}
-	}
+	console.log(chalk.green('  ✓ Each selected ticket will run on its own branch/worktree.'));
 
 	type TicketPlanData = {
 		clarifications: string;
@@ -3656,7 +3656,17 @@ export async function launchMultipleTickets(
 			userModifications = modifications;
 
 			console.log(chalk.gray('  Generating implementation plan...'));
-			const planItems = await generateTodoPlan(detail, contributing ?? '', clarifications, modifications);
+			let planItems = await generateTodoPlan(detail, contributing ?? '', clarifications, modifications);
+			if (!planItems) {
+				const fallback = await askPlanGenerationFallback(detail.key);
+				if (fallback === 'retry') {
+					console.log(chalk.gray('  Retrying plan generation...'));
+					planItems = await generateTodoPlan(detail, contributing ?? '', clarifications, modifications);
+				}
+				if (!planItems && fallback === 'abort') {
+					throw new Error(`Aborted before execution for ${detail.key}.`);
+				}
+			}
 			if (planItems) {
 				const result = await reviewTodoPlan(planItems, detail, contributing ?? '', clarifications);
 				if (result.action === 'approve') {
@@ -3665,7 +3675,7 @@ export async function launchMultipleTickets(
 				}
 				planReviewModifications = result.lastModifications;
 			} else {
-				console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+				console.log(chalk.gray('  Proceeding without a pre-approved plan.'));
 			}
 		}
 
@@ -3731,10 +3741,10 @@ export async function launchMultipleTickets(
 
 			await transitionIssueToInProgress(detail);
 
-			const effectiveBranchKey = useSingleBranch ? details[0].key : detail.key;
+			const effectiveBranchKey = detail.key;
 
 			for (const repoPath of paths) {
-				const useWorktree = resolution.needsWorktree.has(repoPath);
+				const useWorktree = true;
 				let axonChild: ReturnType<typeof startAxonWatch> = null;
 
 				try {
@@ -3842,7 +3852,6 @@ export async function launchMultipleTickets(
 			);
 			if (finalSummary) {
 				await notifySlackStatus(finalSummary);
-				await addJiraComment(detail.key, finalSummary).catch(() => {});
 			}
 			for (const effectivePath of ticketEffPaths) {
 				await cleanupTodoFiles(effectivePath);
@@ -3862,13 +3871,7 @@ export async function launchMultipleTickets(
 		onStatusChange(statuses);
 	};
 
-	if (useSingleBranch) {
-		for (const [i, detail] of details.entries()) {
-			await runTicket(detail, i);
-		}
-	} else {
-		await Promise.allSettled(details.map((detail, i) => runTicket(detail, i)));
-	}
+	await Promise.allSettled(details.map((detail, i) => runTicket(detail, i)));
 
 	return statuses;
 }
@@ -3942,7 +3945,17 @@ export async function launchAgentForCustomTask(
 	let approvedTodoItems: string[] = [];
 
 	console.log(chalk.gray('\n  Generating implementation plan...'));
-	const planItems = await generateCustomTodoPlan(taskDescription, contributing ?? '', clarifications);
+	let planItems = await generateCustomTodoPlan(taskDescription, contributing ?? '', clarifications);
+	if (!planItems) {
+		const fallback = await askPlanGenerationFallback(branchName);
+		if (fallback === 'retry') {
+			console.log(chalk.gray('  Retrying plan generation...'));
+			planItems = await generateCustomTodoPlan(taskDescription, contributing ?? '', clarifications);
+		}
+		if (!planItems && fallback === 'abort') {
+			throw new Error(`Aborted before execution for ${branchName}.`);
+		}
+	}
 	let customBaseBranchOverride: string | null = null;
 	if (planItems) {
 		const result = await reviewCustomTodoPlan(planItems, taskDescription, contributing ?? '', clarifications);
@@ -3956,7 +3969,7 @@ export async function launchAgentForCustomTask(
 			console.log(chalk.green(`  ✓ Base branch override detected: ${customBaseBranchOverride}`));
 		}
 	} else {
-		console.log(chalk.gray('  Could not generate plan. The agent will create its own.'));
+		console.log(chalk.gray('  Proceeding without a pre-approved plan.'));
 	}
 
 	await notifySlackStatus(`ForgePilot started ${agentOption.label} for custom task "${branchName}" across ${paths.length} repo(s).`);
