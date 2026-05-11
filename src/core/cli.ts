@@ -32,6 +32,7 @@ import {
 	renderPostAgentPrompt,
 	renderJobList,
 	renderLogViewer,
+	renderMultiLogViewer,
 } from './ui.js';
 import { getJob, stopJob } from './job-manager.js';
 
@@ -62,9 +63,13 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let expandedScope = false;
 	let inJobList = false;
 	let inLogViewer = false;
+	let inMultiLogViewer = false;
 	let jobListItems: import('./job-manager.js').JobRecord[] = [];
 	let selectedJobIndex = 0;
+	const selectedJobIds = new Set<string>();
 	let viewingJob: import('./job-manager.js').JobRecord | null = null;
+	let viewingJobs: import('./job-manager.js').JobRecord[] = [];
+	let selectedMultiLogIndex = 0;
 	let logTailInterval: ReturnType<typeof setInterval> | null = null;
 	const checkedIndices = new Set<number>();
 	const jobStatusMap = new Map<string, JobStatus>();
@@ -123,13 +128,15 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	async function openJobList(): Promise<void> {
 		jobListItems = await getJobs();
 		selectedJobIndex = 0;
+		selectedJobIds.clear();
 		inJobList = true;
-		renderJobList(jobListItems, selectedJobIndex);
+		renderJobList(jobListItems, selectedJobIndex, selectedJobIds);
 	}
 
 	async function openLogViewer(job: import('./job-manager.js').JobRecord): Promise<void> {
 		viewingJob = job;
 		inLogViewer = true;
+		inMultiLogViewer = false;
 		inJobList = false;
 		const lines = await readLogTail(job.logFile);
 		renderLogViewer(job, lines);
@@ -142,20 +149,70 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		}, 2000);
 	}
 
+	async function openMultiLogViewer(jobs: import('./job-manager.js').JobRecord[]): Promise<void> {
+		viewingJobs = jobs;
+		selectedMultiLogIndex = 0;
+		inMultiLogViewer = true;
+		inLogViewer = false;
+		inJobList = false;
+
+		const tails = await Promise.all(jobs.map(async (job) => ({ job, lines: await readLogTail(job.logFile) })));
+		renderMultiLogViewer(tails, selectedMultiLogIndex);
+
+		logTailInterval = setInterval(async () => {
+			if (!inMultiLogViewer || viewingJobs.length === 0) return;
+			const freshJobs = await Promise.all(viewingJobs.map(async (job) => (await getJob(job.id)) ?? job));
+			viewingJobs = freshJobs;
+			const freshTails = await Promise.all(viewingJobs.map(async (job) => ({ job, lines: await readLogTail(job.logFile) })));
+			renderMultiLogViewer(freshTails, selectedMultiLogIndex);
+		}, 2000);
+	}
+
+	async function openLogsForTicketKeys(ticketKeys: string[]): Promise<void> {
+		const jobs = await getJobs();
+		const filtered = jobs
+			.filter((job) => ticketKeys.includes(job.ticketKey))
+			.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+		const latestByTicket = new Map<string, import('./job-manager.js').JobRecord>();
+		for (const job of filtered) {
+			if (!latestByTicket.has(job.ticketKey)) latestByTicket.set(job.ticketKey, job);
+		}
+
+		const selectedJobs = [...latestByTicket.values()];
+		if (selectedJobs.length === 0) {
+			clearScreen();
+			console.log(chalk.yellow('No logs found for selected ticket(s).'));
+			console.log(chalk.gray('\nReturning to ticket list...'));
+			await new Promise((resolve) => setTimeout(resolve, 1200));
+			redrawList();
+			return;
+		}
+
+		if (selectedJobs.length === 1) {
+			await openLogViewer(selectedJobs[0]);
+			return;
+		}
+
+		await openMultiLogViewer(selectedJobs);
+	}
+
 	function closeLogViewer(): void {
 		if (logTailInterval) {
 			clearInterval(logTailInterval);
 			logTailInterval = null;
 		}
 		viewingJob = null;
+		viewingJobs = [];
 		inLogViewer = false;
+		inMultiLogViewer = false;
 	}
 
 	const redrawList = () => renderList(tickets, selectedIndex, expandedScope, checkedIndices, jobStatusMap);
 
 	const isMainListVisible = () =>
 		!inDetailView && !inAgentPicker && !inMultiAgentPicker && !inMultiBrief &&
-		!showPostAgentPrompt && !showMultiSummary && !inJobList && !inLogViewer && !launchingAgent && !isAwaitingInput;
+		!showPostAgentPrompt && !showMultiSummary && !inJobList && !inLogViewer && !inMultiLogViewer && !launchingAgent && !isAwaitingInput;
 
 	statusRefreshInterval = setInterval(async () => {
 		await cleanupStaleJobs();
@@ -182,6 +239,27 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		}
 
 		if (isAwaitingInput) return;
+
+		if (inMultiLogViewer) {
+			if (key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
+				closeLogViewer();
+				await openJobList();
+				return;
+			}
+			if (key.name === 'up' && viewingJobs.length) {
+				selectedMultiLogIndex = selectedMultiLogIndex === 0 ? viewingJobs.length - 1 : selectedMultiLogIndex - 1;
+				const tails = await Promise.all(viewingJobs.map(async (job) => ({ job, lines: await readLogTail(job.logFile) })));
+				renderMultiLogViewer(tails, selectedMultiLogIndex);
+				return;
+			}
+			if (key.name === 'down' && viewingJobs.length) {
+				selectedMultiLogIndex = selectedMultiLogIndex === viewingJobs.length - 1 ? 0 : selectedMultiLogIndex + 1;
+				const tails = await Promise.all(viewingJobs.map(async (job) => ({ job, lines: await readLogTail(job.logFile) })));
+				renderMultiLogViewer(tails, selectedMultiLogIndex);
+				return;
+			}
+			return;
+		}
 
 		if (inLogViewer) {
 			if (key.name === 'q' || key.name === 'escape' || key.name === 'backspace') {
@@ -245,16 +323,39 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			}
 			if (key.name === 'up' && jobListItems.length) {
 				selectedJobIndex = selectedJobIndex === 0 ? jobListItems.length - 1 : selectedJobIndex - 1;
-				renderJobList(jobListItems, selectedJobIndex);
+				renderJobList(jobListItems, selectedJobIndex, selectedJobIds);
 				return;
 			}
 			if (key.name === 'down' && jobListItems.length) {
 				selectedJobIndex = selectedJobIndex === jobListItems.length - 1 ? 0 : selectedJobIndex + 1;
-				renderJobList(jobListItems, selectedJobIndex);
+				renderJobList(jobListItems, selectedJobIndex, selectedJobIds);
+				return;
+			}
+			if (key.name === 'space' && jobListItems.length) {
+				const selectedJob = jobListItems[selectedJobIndex];
+				if (selectedJobIds.has(selectedJob.id)) selectedJobIds.delete(selectedJob.id);
+				else selectedJobIds.add(selectedJob.id);
+				renderJobList(jobListItems, selectedJobIndex, selectedJobIds);
+				return;
+			}
+			if (key.name === 'v' && selectedJobIds.size > 0) {
+				const selectedJobs = jobListItems.filter((job) => selectedJobIds.has(job.id));
+				if (selectedJobs.length === 1) {
+					await openLogViewer(selectedJobs[0]);
+				} else if (selectedJobs.length > 1) {
+					await openMultiLogViewer(selectedJobs);
+				}
 				return;
 			}
 			if ((key.name === 'return' || key.name === 'enter') && jobListItems.length) {
-				await openLogViewer(jobListItems[selectedJobIndex]);
+				const selectedJobs = selectedJobIds.size > 0
+					? jobListItems.filter((job) => selectedJobIds.has(job.id))
+					: [jobListItems[selectedJobIndex]];
+				if (selectedJobs.length === 1) {
+					await openLogViewer(selectedJobs[0]);
+				} else if (selectedJobs.length > 1) {
+					await openMultiLogViewer(selectedJobs);
+				}
 				return;
 			}
 			return;
@@ -684,6 +785,14 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			return;
 		}
 
+		if (key.name === 'v' && !loadingDetail && !loadingMore && !launchingAgent && tickets.length) {
+			const selectedTicketKeys = checkedIndices.size > 0
+				? [...checkedIndices].map((i) => tickets[i]?.key).filter((k): k is string => Boolean(k))
+				: [tickets[selectedIndex]?.key].filter((k): k is string => Boolean(k));
+			await openLogsForTicketKeys(selectedTicketKeys);
+			return;
+		}
+
 		if (key.name === 'space' && !loadingDetail && !loadingMore && !launchingAgent && tickets.length) {
 			if (checkedIndices.has(selectedIndex)) checkedIndices.delete(selectedIndex);
 			else checkedIndices.add(selectedIndex);
@@ -813,6 +922,11 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		}
 
 		if (key.name === 'return' || key.name === 'enter') {
+			if (checkedIndices.size <= 1 && tickets[selectedIndex] && jobStatusMap.has(tickets[selectedIndex].key)) {
+				await openLogsForTicketKeys([tickets[selectedIndex].key]);
+				return;
+			}
+
 			if (checkedIndices.size > 1) {
 				const selectedTickets = [...checkedIndices].map((i) => tickets[i]);
 				const skipDetail = (process.env.FORGEPILOT_SKIP_DETAIL ?? '').trim().toLowerCase() === 'true';

@@ -158,8 +158,8 @@ export function renderList(
 		),
 	);
 	const keyHints = checkedIndices
-		? 'Keys: ↑/↓ navigate, Space toggle, a select all, Enter details, w work, l jobs, q quit'
-		: 'Keys: ↑/↓ navigate, Space toggle, Enter details, m more, l jobs, q quit';
+		? 'Keys: ↑/↓ navigate, Space toggle, a select all, Enter details, w work, v selected logs, l jobs, q quit'
+		: 'Keys: ↑/↓ navigate, Space toggle, Enter details, m more, v logs, l jobs, q quit';
 	console.log(chalk.gray(keyHints));
 	console.log(chalk.gray('='.repeat(90)));
 
@@ -262,9 +262,9 @@ export function renderMultiTicketDashboard(statuses: TicketRunStatus[]) {
 	console.log(chalk.gray('='.repeat(90)));
 	console.log(
 		chalk.white(`  Total: ${total}  `) +
-			chalk.cyan(`Running: ${running}  `) +
-			chalk.green(`Done: ${done}  `) +
-			chalk.red(`Failed: ${failed}`),
+		chalk.cyan(`Running: ${running}  `) +
+		chalk.green(`Done: ${done}  `) +
+		chalk.red(`Failed: ${failed}`),
 	);
 	console.log(chalk.gray('-'.repeat(90)));
 	console.log();
@@ -392,10 +392,42 @@ export function renderLogViewer(job: JobRecord, logLines: string[]) {
 	console.log(chalk.gray(`  Keys: ${actions.join('  |  ')}`));
 }
 
-export function renderJobList(jobs: JobRecord[], selectedIndex: number) {
+export function renderMultiLogViewer(jobLogs: Array<{ job: JobRecord; lines: string[] }>, selectedIndex: number) {
+	clearScreen();
+	const total = jobLogs.length;
+	const active = jobLogs[Math.max(0, Math.min(selectedIndex, total - 1))];
+
+	console.log(chalk.bold(`Live Ticket Logs (${total})`));
+	console.log(chalk.gray('Keys: up/down switch focus, q/Esc back'));
+	console.log(chalk.gray('='.repeat(90)));
+
+	if (!active) {
+		console.log(chalk.gray('  No logs to display.'));
+		console.log(chalk.gray('='.repeat(90)));
+		return;
+	}
+
+	console.log(chalk.white(`  Focus: ${active.job.ticketKey} - ${active.job.title}`));
+	console.log(chalk.gray(`  Agent: ${active.job.agent}  |  Status: ${jobStatusBadge(active.job.status)}`));
+	console.log(chalk.gray('-'.repeat(90)));
+
+	const tail = active.lines.slice(-LOG_TAIL_LINES);
+	if (tail.length === 0) {
+		console.log(chalk.gray('  (no output yet)'));
+	} else {
+		for (const line of tail) {
+			console.log(chalk.white(`  ${line}`));
+		}
+	}
+
+	console.log(chalk.gray('='.repeat(90)));
+	console.log(chalk.gray(`  Tickets: ${jobLogs.map((jl, idx) => idx === selectedIndex ? `[${jl.job.ticketKey}]` : jl.job.ticketKey).join('  ')}`));
+}
+
+export function renderJobList(jobs: JobRecord[], selectedIndex: number, selectedJobIds: Set<string> = new Set()) {
 	clearScreen();
 	console.log(chalk.bold('Background Jobs'));
-	console.log(chalk.gray('Keys: ↑/↓ navigate, Enter view logs, q back'));
+	console.log(chalk.gray('Keys: ↑/↓ navigate, Space toggle, Enter view logs, v open selected logs, q back'));
 	console.log(chalk.gray('='.repeat(90)));
 
 	if (!jobs.length) {
@@ -407,10 +439,11 @@ export function renderJobList(jobs: JobRecord[], selectedIndex: number) {
 	for (let i = 0; i < jobs.length; i++) {
 		const j = jobs[i];
 		const pointer = i === selectedIndex ? chalk.bold.cyan('▶') : ' ';
+		const checked = selectedJobIds.has(j.id) ? chalk.green('◉') : chalk.gray('○');
 		const badge = jobStatusBadge(j.status);
 		const key = i === selectedIndex ? chalk.bold.white(j.ticketKey) : chalk.white(j.ticketKey);
 		const title = i === selectedIndex ? chalk.bold(j.title) : chalk.gray(j.title);
-		console.log(`${pointer} ${badge}  ${key}  ${title}`);
+		console.log(`${pointer} ${checked} ${badge}  ${key}  ${title}`);
 	}
 	console.log(chalk.gray('-'.repeat(90)));
 }
@@ -485,7 +518,7 @@ export function renderSubAgentLogViewer(
 	clearScreen();
 	const badge = status === 'running' ? chalk.cyan('⟳ Working')
 		: status === 'done' ? chalk.green('✓ Done')
-		: chalk.red('✗ Failed');
+			: chalk.red('✗ Failed');
 
 	console.log(chalk.bold(`${ticketKey} — Agent ${agentIndex + 1} Logs`));
 	console.log(`  Status: ${badge}`);
