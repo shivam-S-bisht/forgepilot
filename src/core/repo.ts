@@ -108,15 +108,22 @@ export async function getRemoteUrls(repoPath: string): Promise<string[]> {
 	}
 }
 
-function findMatchingRepo(normalizedUrl: string, remoteIndex: Map<string, string>): string | undefined {
-	const exact = remoteIndex.get(normalizedUrl);
-	if (exact) return exact;
+function findMatchingRepo(normalizedUrl: string, remoteIndex: Map<string, string[]>): string | undefined {
+	const exact = remoteIndex.get(normalizedUrl) ?? [];
+	if (exact.length === 1) return exact[0];
 
-	for (const [remote, localPath] of remoteIndex) {
+	const partialMatches = new Set<string>();
+	for (const [remote, localPaths] of remoteIndex) {
 		if (remote.includes(normalizedUrl) || normalizedUrl.includes(remote)) {
-			return localPath;
+			for (const localPath of localPaths) partialMatches.add(localPath);
 		}
 	}
+
+	// Do not auto-pick when matching is ambiguous (e.g. multiple repos named "admin").
+	if (partialMatches.size === 1) {
+		return [...partialMatches][0];
+	}
+
 	return undefined;
 }
 
@@ -136,18 +143,17 @@ export function formatRepoPathForDisplay(repos: string[]): Map<string, string> {
 		basenameCount.get(basename)!.push(repo);
 	}
 
-	// Format display names: use basename if unique, otherwise use parent/basename
+	// Format display names with local path context so similarly named repos are obvious.
 	for (const repo of repos) {
 		const basename = path.basename(repo);
 		const siblings = basenameCount.get(basename) ?? [];
+		const relPath = repo;
 
 		if (siblings.length === 1) {
-			// Unique basename - show just the name
-			displayNames.set(repo, basename);
+			displayNames.set(repo, `${basename} - ${relPath}`);
 		} else {
-			// Collision detected - show parent/basename for disambiguation
 			const parent = path.basename(path.dirname(repo));
-			displayNames.set(repo, `${parent}/${basename}`);
+			displayNames.set(repo, `${parent}/${basename} - ${relPath}`);
 		}
 	}
 
@@ -287,17 +293,19 @@ export const MANUAL_URL_SENTINEL = '__enter_url__';
 async function resolveManualUrl(
 	url: string,
 	localRepoPaths: string[],
-	remoteIndex?: Map<string, string>,
+	remoteIndex?: Map<string, string[]>,
 ): Promise<string | null> {
 	const normalized = normalizeRepoUrl(url);
 	if (!normalized) return null;
 
-	const idx = remoteIndex ?? new Map<string, string>();
+	const idx = remoteIndex ?? new Map<string, string[]>();
 	if (!remoteIndex) {
 		for (const localPath of localRepoPaths) {
 			const remotes = await getRemoteUrls(localPath);
 			for (const remote of remotes) {
-				if (!idx.has(remote)) idx.set(remote, localPath);
+				const localPaths = idx.get(remote) ?? [];
+				localPaths.push(localPath);
+				idx.set(remote, localPaths);
 			}
 		}
 	}
@@ -412,11 +420,13 @@ export async function resolveRepoPathsFromUser(detail: JiraIssueDetail): Promise
 			console.log(chalk.cyan(`  ${repo.label} (${repo.normalizedUrl})`));
 		}
 
-		const remoteIndex = new Map<string, string>();
+		const remoteIndex = new Map<string, string[]>();
 		for (const localPath of localRepoPaths) {
 			const remotes = await getRemoteUrls(localPath);
 			for (const remote of remotes) {
-				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+				const localPaths = remoteIndex.get(remote) ?? [];
+				localPaths.push(localPath);
+				remoteIndex.set(remote, localPaths);
 			}
 		}
 
@@ -581,11 +591,13 @@ export async function resolveRepoPathsAuto(detail: JiraIssueDetail): Promise<Map
 
 	const scanDepth = getRepoScanDepth();
 	const localRepoPaths = await scanLocalRepos(rootDir, 0, scanDepth);
-	const remoteIndex = new Map<string, string>();
+	const remoteIndex = new Map<string, string[]>();
 	for (const localPath of localRepoPaths) {
 		const remotes = await getRemoteUrls(localPath);
 		for (const remote of remotes) {
-			if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+			const localPaths = remoteIndex.get(remote) ?? [];
+			localPaths.push(localPath);
+			remoteIndex.set(remote, localPaths);
 		}
 	}
 
@@ -613,11 +625,13 @@ export async function resolveRepoPathsViaSlack(detail: JiraIssueDetail): Promise
 
 	if (ticketRepos.length) {
 		console.log(chalk.gray(`  Found ${ticketRepos.length} repo URL(s) in ticket description. Auto-matching...`));
-		const remoteIndex = new Map<string, string>();
+		const remoteIndex = new Map<string, string[]>();
 		for (const localPath of localRepoPaths) {
 			const remotes = await getRemoteUrls(localPath);
 			for (const remote of remotes) {
-				if (!remoteIndex.has(remote)) remoteIndex.set(remote, localPath);
+				const localPaths = remoteIndex.get(remote) ?? [];
+				localPaths.push(localPath);
+				remoteIndex.set(remote, localPaths);
 			}
 		}
 
