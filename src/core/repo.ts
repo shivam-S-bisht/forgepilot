@@ -122,10 +122,36 @@ function findMatchingRepo(normalizedUrl: string, remoteIndex: Map<string, string
 
 export const AI_DECIDES_SENTINEL = '__ai_decides__';
 
-function formatPickerItem(item: string): string {
-	if (item === AI_DECIDES_SENTINEL) return '✨ Let AI figure it out (select all repos)';
-	if (item === MANUAL_URL_SENTINEL) return '🔗 Enter a repo URL or local path';
-	return item;
+/** Format repository paths for display, handling naming collisions by showing parent directory context. */
+export function formatRepoPathForDisplay(repos: string[]): Map<string, string> {
+	const displayNames = new Map<string, string>();
+	const basenameCount = new Map<string, string[]>();
+
+	// Count repos by basename to detect collisions
+	for (const repo of repos) {
+		const basename = path.basename(repo);
+		if (!basenameCount.has(basename)) {
+			basenameCount.set(basename, []);
+		}
+		basenameCount.get(basename)!.push(repo);
+	}
+
+	// Format display names: use basename if unique, otherwise use parent/basename
+	for (const repo of repos) {
+		const basename = path.basename(repo);
+		const siblings = basenameCount.get(basename) ?? [];
+
+		if (siblings.length === 1) {
+			// Unique basename - show just the name
+			displayNames.set(repo, basename);
+		} else {
+			// Collision detected - show parent/basename for disambiguation
+			const parent = path.basename(path.dirname(repo));
+			displayNames.set(repo, `${parent}/${basename}`);
+		}
+	}
+
+	return displayNames;
 }
 
 export function pickReposInteractive(
@@ -133,6 +159,7 @@ export function pickReposInteractive(
 	title: string,
 	options?: { includeAiOption?: boolean },
 ): Promise<string[]> {
+	const displayNames = formatRepoPathForDisplay(repos);
 	const displayItems = options?.includeAiOption
 		? [...repos, AI_DECIDES_SENTINEL]
 		: [...repos];
@@ -144,8 +171,14 @@ export function pickReposInteractive(
 		readline.emitKeypressEvents(process.stdin);
 		if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
+		const formatForRender = (item: string): string => {
+			if (item === AI_DECIDES_SENTINEL) return '✨ Let AI figure it out (select all repos)';
+			if (item === MANUAL_URL_SENTINEL) return '🔗 Enter a repo URL or local path';
+			return displayNames.get(item) ?? item;
+		};
+
 		const render = () => renderRepoPicker(
-			displayItems.map(formatPickerItem),
+			displayItems.map(formatForRender),
 			cursorIndex,
 			selectedIndices,
 			title,

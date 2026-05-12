@@ -131,6 +131,7 @@ server.tool(
 	async ({ root_dir }) => {
 		const resolved = root_dir.replace(/^~/, process.env.HOME ?? '~');
 		const repos = await scanLocalRepos(resolved);
+
 		return {
 			content: [{
 				type: 'text',
