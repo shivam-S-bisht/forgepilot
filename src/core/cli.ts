@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, watch as fsWatch } from 'node:fs';
 import fs from 'node:fs/promises';
 import readline from 'node:readline';
 import chalk from 'chalk';
@@ -71,6 +71,8 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 	let viewingJobs: import('./job-manager.js').JobRecord[] = [];
 	let selectedMultiLogIndex = 0;
 	let logTailInterval: ReturnType<typeof setInterval> | null = null;
+	let logFileWatchers: import('node:fs').FSWatcher[] = [];
+	let logWatchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	const checkedIndices = new Set<number>();
 	const jobStatusMap = new Map<string, JobStatus>();
 
@@ -104,6 +106,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			clearInterval(logTailInterval);
 			logTailInterval = null;
 		}
+		for (const w of logFileWatchers) { try { w.close(); } catch { /* ignore */ } }
+		logFileWatchers = [];
+		if (logWatchDebounceTimer) { clearTimeout(logWatchDebounceTimer); logWatchDebounceTimer = null; }
 		if (statusRefreshInterval) {
 			clearInterval(statusRefreshInterval);
 			statusRefreshInterval = null;
@@ -140,12 +145,46 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		inJobList = false;
 		const lines = await readLogTail(job.logFile);
 		renderLogViewer(job, lines);
-		logTailInterval = setInterval(async () => {
+
+		// Clear any previous watcher/interval
+		if (logTailInterval) { clearInterval(logTailInterval); logTailInterval = null; }
+		for (const w of logFileWatchers) { try { w.close(); } catch { /* ignore */ } }
+		logFileWatchers = [];
+		if (logWatchDebounceTimer) { clearTimeout(logWatchDebounceTimer); logWatchDebounceTimer = null; }
+
+		const scheduleRefresh = async () => {
 			if (!inLogViewer || !viewingJob) return;
 			const freshJob = await getJob(viewingJob.id);
 			if (freshJob) viewingJob = freshJob;
 			const freshLines = await readLogTail(viewingJob.logFile);
 			renderLogViewer(viewingJob, freshLines);
+		};
+
+		const attachWatcher = (filePath: string) => {
+			try {
+				const w = fsWatch(filePath, () => {
+					if (logWatchDebounceTimer) clearTimeout(logWatchDebounceTimer);
+					logWatchDebounceTimer = setTimeout(() => { void scheduleRefresh(); }, 80);
+				});
+				w.on('error', () => { /* watcher error — slow poll covers it */ });
+				logFileWatchers.push(w);
+			} catch {
+				// fs.watch unavailable for this path; slow poll will handle it
+			}
+		};
+
+		if (existsSync(job.logFile)) {
+			attachWatcher(job.logFile);
+		}
+
+		// Slow poll: catches job status changes and the "file not yet created" window
+		logTailInterval = setInterval(async () => {
+			if (!inLogViewer || !viewingJob) return;
+			// Attach watcher once file appears
+			if (existsSync(viewingJob.logFile) && logFileWatchers.length === 0) {
+				attachWatcher(viewingJob.logFile);
+			}
+			await scheduleRefresh();
 		}, 2000);
 	}
 
@@ -159,12 +198,52 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 		const tails = await Promise.all(jobs.map(async (job) => ({ job, lines: await readLogTail(job.logFile) })));
 		renderMultiLogViewer(tails, selectedMultiLogIndex);
 
-		logTailInterval = setInterval(async () => {
+		// Clear any previous watcher/interval
+		if (logTailInterval) { clearInterval(logTailInterval); logTailInterval = null; }
+		for (const w of logFileWatchers) { try { w.close(); } catch { /* ignore */ } }
+		logFileWatchers = [];
+		if (logWatchDebounceTimer) { clearTimeout(logWatchDebounceTimer); logWatchDebounceTimer = null; }
+
+		const scheduleMultiRefresh = async () => {
 			if (!inMultiLogViewer || viewingJobs.length === 0) return;
 			const freshJobs = await Promise.all(viewingJobs.map(async (job) => (await getJob(job.id)) ?? job));
 			viewingJobs = freshJobs;
 			const freshTails = await Promise.all(viewingJobs.map(async (job) => ({ job, lines: await readLogTail(job.logFile) })));
 			renderMultiLogViewer(freshTails, selectedMultiLogIndex);
+		};
+
+		for (const job of jobs) {
+			if (existsSync(job.logFile)) {
+				try {
+					const w = fsWatch(job.logFile, () => {
+						if (logWatchDebounceTimer) clearTimeout(logWatchDebounceTimer);
+						logWatchDebounceTimer = setTimeout(() => { void scheduleMultiRefresh(); }, 80);
+					});
+					w.on('error', () => { /* watcher error — slow poll covers it */ });
+					logFileWatchers.push(w);
+				} catch { /* unavailable */ }
+			}
+		}
+
+		// Slow poll: catches status changes and newly-created log files
+		logTailInterval = setInterval(async () => {
+			if (!inMultiLogViewer || viewingJobs.length === 0) return;
+			// Attach watchers for any log files that just appeared
+			const watched = new Set(logFileWatchers.map((_, i) => i));
+			for (let i = watched.size; i < viewingJobs.length; i++) {
+				const f = viewingJobs[i].logFile;
+				if (existsSync(f)) {
+					try {
+						const w = fsWatch(f, () => {
+							if (logWatchDebounceTimer) clearTimeout(logWatchDebounceTimer);
+							logWatchDebounceTimer = setTimeout(() => { void scheduleMultiRefresh(); }, 80);
+						});
+						w.on('error', () => { /* ignore */ });
+						logFileWatchers.push(w);
+					} catch { /* unavailable */ }
+				}
+			}
+			await scheduleMultiRefresh();
 		}, 2000);
 	}
 
@@ -202,6 +281,9 @@ export async function startInteractiveCli(tickets: TicketView[], boards: Map<num
 			clearInterval(logTailInterval);
 			logTailInterval = null;
 		}
+		for (const w of logFileWatchers) { try { w.close(); } catch { /* ignore */ } }
+		logFileWatchers = [];
+		if (logWatchDebounceTimer) { clearTimeout(logWatchDebounceTimer); logWatchDebounceTimer = null; }
 		viewingJob = null;
 		viewingJobs = [];
 		inLogViewer = false;

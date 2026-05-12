@@ -1187,7 +1187,10 @@ export async function pushBranchAndCreateMR(
 
 	console.log(chalk.bold.cyan(`\n  Pre-push review for ${branchName}:`));
 	console.log(chalk.gray(`  Branch: ${branchName} → ${baseBranch}`));
-	console.log(chalk.gray(`  Commits: ${commitCount}`));
+	console.log(chalk.gray(`  Commits (${commitCount}):`));
+	for (const line of commitLog.split('\n').filter(Boolean)) {
+		console.log(chalk.white(`    ${chalk.cyan('•')} ${line}`));
+	}
 	console.log('');
 	console.log(chalk.white(diffStat.split('\n').map((l) => `    ${l}`).join('\n')));
 	console.log('');
