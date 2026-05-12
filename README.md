@@ -242,6 +242,8 @@ export FORGEPILOT_JIRA_BASE_URL="https://yourcompany.atlassian.net"
 export FORGEPILOT_JIRA_EMAIL="you@company.com"
 export FORGEPILOT_JIRA_API_TOKEN="ATATT3x..."
 export FORGEPILOT_ROOT_DIR="~/dev"
+# Optional for corporate TLS interception only (insecure):
+# export FORGEPILOT_JIRA_INSECURE_TLS="true"
 
 # Automation (optional)
 export FORGEPILOT_DEFAULT_AGENT="copilot-autonomous"
@@ -425,6 +427,7 @@ All ForgePilot-specific variables use the `FORGEPILOT_` prefix. Active configura
 | `FORGEPILOT_JIRA_BASE_URL` | Jira instance URL (e.g. `https://mycompany.atlassian.net`) | **Required** |
 | `FORGEPILOT_JIRA_EMAIL` | Atlassian account email for API auth | **Required** |
 | `FORGEPILOT_JIRA_API_TOKEN` | Jira API token ([create one here](https://id.atlassian.com/manage-profile/security/api-tokens)) | **Required** |
+| `FORGEPILOT_JIRA_INSECURE_TLS` | Set to `true` to bypass TLS certificate validation for Jira requests only (temporary workaround for corporate TLS interception) | `false` |
 | `FORGEPILOT_JIRA_AC_FIELD` | Custom Jira field ID for Acceptance Criteria | *(AC section omitted)* |
 
 ### Axon
