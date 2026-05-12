@@ -9,7 +9,7 @@ import chalk from 'chalk';
 import { getAxonPromptHint, logAxonStatus, startAxonWatch, stopAxonWatch } from '../tools/axon/axon.js';
 import { clearCached, getCached, setCached } from './cache.js';
 import { fetchFigmaDesignContext } from '../tools/figma/figma.js';
-import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText, buildSummaryPrompt } from '../tools/git/git.js';
+import { extractBaseBranchOverride, fetchUnresolvedReviewComments, findOpenPullRequest, prepareRepoForWork, readContributing, removeWorktree, createSubAgentWorktree, mergeSubAgentBranches, cleanupSubAgentWorktrees, cleanupForgepilotTempFiles, generateCompletionSummary, formatCompletionSummaryText, buildSummaryPrompt, pushBranchAndCreateMR } from '../tools/git/git.js';
 import type { TicketCompletionSummary } from '../tools/git/git.js';
 import type { OpenPR, ReviewComment, SubAgentBranchAnalysis } from '../tools/git/git.js';
 import { transitionIssueToInProgress, fetchIssueDetail } from '../tools/jira/jira.js';
@@ -3505,6 +3505,18 @@ export async function launchAgentInBackground(
 			await notifySlackStatus(
 				`ForgePilot parallel execution for ${detail.key}: ${doneCount} succeeded, ${failedCount} failed.${hasIncomplete ? ' Some work may be incomplete — review needed.' : ''}`,
 			);
+
+			// Push merged code to remote with interactive pre-push review
+			if (failedCount === 0 && !hasIncomplete) {
+				try {
+					console.log(chalk.bold.cyan(`\n  Preparing to push merged work...`));
+					await pushBranchAndCreateMR(effectivePath, detail.key, ticketTitle, jiraUrl);
+				} catch (err: unknown) {
+					console.log(chalk.yellow(`  ⚠ Push failed or cancelled: ${err instanceof Error ? err.message : String(err)}`));
+				}
+			} else {
+				console.log(chalk.yellow(`  ⚠ Skipping auto-push due to failures or incomplete work — review manually before pushing.`));
+			}
 
 			// Register a summary job so the ticket list shows completion status
 			const summaryJob: JobRecord = {

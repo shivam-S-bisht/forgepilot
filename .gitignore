@@ -6,3 +6,4 @@ coverage/
 *.tsbuildinfo
 .cache/
 .axon
+.forgepilot-todos-*.md
