@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.34](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.33...v0.1.34) (2026-05-12)
+
+
+### Bug Fixes
+
+* preserve duplicate repo candidates during resolution ([3b4fd4c](https://github.com/shivam-S-bisht/forgepilot/commit/3b4fd4c03a688ac438cbdc6c4cee40bb6239f46b))
+
 ### [0.1.33](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.32...v0.1.33) (2026-05-12)
 
 
