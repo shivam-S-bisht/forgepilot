@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.35](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.34...v0.1.35) (2026-05-12)
+
+
+### Features
+
+* real-time log streaming and commit list in pre-push review ([2e1fe59](https://github.com/shivam-S-bisht/forgepilot/commit/2e1fe5904f23f46ed74497d4adb0db44fdb57ed7))
+
+
+### Bug Fixes
+
+* exclude todo files from commits and add pre-push review to multi-agent flow ([b189557](https://github.com/shivam-S-bisht/forgepilot/commit/b1895576f8bb4a12a20d5b5d6754c39418a310ae))
+
 ### [0.1.34](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.33...v0.1.34) (2026-05-12)
 
 
