@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [0.1.33](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.32...v0.1.33) (2026-05-12)
+
+
+### Bug Fixes
+
+* disambiguate repos with identical basenames in picker ([438a646](https://github.com/shivam-S-bisht/forgepilot/commit/438a6466fed97db5ee9343d4ea490198f21021d9))
+* resolve Jira fetch failed due to corporate TLS interception ([dd46779](https://github.com/shivam-S-bisht/forgepilot/commit/dd46779f61f0ac53e5f9d9ed4e6cf168b6980274))
+
 ### [0.1.32](https://github.com/shivam-S-bisht/forgepilot/compare/v0.1.31...v0.1.32) (2026-05-11)
 
 
